@@ -11,6 +11,7 @@ from .tools.materials import register_material_tools
 from .tools.physics import register_physics_tools
 from .tools.mesh import register_mesh_tools
 from .tools.study import register_study_tools
+from .tools.surrogate import register_surrogate_tools
 from .tools.results import register_results_tools
 from .tools.workflow import register_workflow_tools
 from .tools.prompts import register_prompt_templates
@@ -34,6 +35,7 @@ def register_all_tools() -> None:
     register_physics_tools(mcp)
     register_mesh_tools(mcp)
     register_study_tools(mcp)
+    register_surrogate_tools(mcp)
     register_results_tools(mcp)
     register_workflow_tools(mcp)
     register_telemetry_tools(mcp)
