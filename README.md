@@ -151,6 +151,8 @@ comsolpilot/
 | "Server is in use by another client" / 服务端被占用 | Transient GUI-sync contention — the tools retry internally. 属 GUI 同步的瞬时争用，工具内部已自动重试 |
 | Model prompts "save changes?" / 关模型提示保存 | Expected: the AI adds tables and parameters to the model. Save freely. 正常现象：AI 会在模型里添加表格和参数，保存即可 |
 | Port 2036 busy / 端口被占 | Menu option 3 (or `setport`) picks and syncs a new one. 菜单选 3 或 `setport` 换端口，自动同步客户端 |
+| git clone certificate error / clone 报证书吊销 | Corporate proxy blocks CRL fetch: `git -c http.schannelCheckRevoke=false clone ...`. 公司网络下拉不到吊销列表，临时关闭吊销检查 |
+| Tools missing in this chat / 本会话看不到新工具 | A conversation's tool list is frozen when created. Open a NEW conversation. 会话的工具清单在创建时定死，改完配置请开新对话验证 |
 
 More guides / 更多指南: [docs/MCP_SETUP_CN.md](docs/MCP_SETUP_CN.md) ·
 [docs/TOOL_QUICKREF_CN.md](docs/TOOL_QUICKREF_CN.md) ·

@@ -58,8 +58,9 @@ if not exist "%PY%" (
     call :finish
     exit /b 1
 )
-"%PY%" -m pip install --upgrade pip -q
-"%PY%" -m pip install -r "%~dp0requirements-windows.txt" -q
+REM --no-cache-dir: command shims on some setups corrupt pip cache writes.
+REM No pip self-upgrade: shims can interrupt the rename mid-flight (leaves "~ip").
+"%PY%" -m pip install --no-cache-dir -r "%~dp0requirements-windows.txt" -q
 if errorlevel 1 (
     echo [!] Dependency installation failed. Check your network/proxy and re-run.
     call :finish

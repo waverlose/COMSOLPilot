@@ -51,13 +51,35 @@ def python_exe() -> str:
 
 
 def _env_block(port: int) -> dict[str, str]:
-    return {
+    """Environment for the connector process.
+
+    Three hard lessons from new-user pitfalls, all auto-handled here:
+
+    - several MCP clients ignore the ``cwd`` field entirely, so the process
+      would start in a random directory and die with
+      ``ModuleNotFoundError: No module named 'src'`` — PYTHONPATH is the
+      decisive fix;
+    - mph reads APPDATA (and friends) at *import* time, raising
+      ``KeyError: 'APPDATA'`` before any code of ours runs — the four
+      Windows variables must be passed through explicitly;
+    - the stdio channel must be UTF-8, otherwise Chinese output garbles
+      under the default GBK code page.
+    """
+    env = {
         "COMSOL_MODE": "gui",
         "COMSOL_HOST": "localhost",
         "COMSOL_PORT": str(port),
         "COMSOL_PREWARM": "on",
         "COMSOL_PREWARM_WAIT": "20",
+        "PYTHONPATH": str(project_root()),
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
     }
+    for key in ("APPDATA", "LOCALAPPDATA", "USERPROFILE", "PROCESSOR_ARCHITECTURE"):
+        value = os.environ.get(key)
+        if value:
+            env[key] = value
+    return env
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +177,6 @@ def _entry_for_kind(kind: str, port: int) -> dict[str, Any]:
     root = str(project_root())
     if kind == "opencode":
         env = _env_block(port)
-        env["PYTHONPATH"] = root
         return {
             "type": "local",
             "command": [py, "-m", "src.server"],
