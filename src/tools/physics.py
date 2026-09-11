@@ -21,7 +21,7 @@ PHYSICS_INTERFACES = {
     },
     "Heat Transfer": {
         "heat_transfer": "Heat Transfer in Solids (ht)",
-        "conjugate_ht": "Conjugate Heat Transfer (cht)",
+        "htf": "Heat Transfer in Solids and Fluids (htf)",
         "radiation": "Radiation (rad)",
     },
     "Fluid Flow": {
@@ -46,6 +46,7 @@ PHYSICS_INTERFACES = {
         "fluid_structure": "Fluid-Structure Interaction (fsi)",
         "electromechanical": "Electromechanical Forces",
         "joule_heating": "Joule Heating (jh)",
+        "nonisothermal": "Non-Isothermal Flow (nitf)",
     },
 }
 
@@ -59,6 +60,10 @@ PHYSICS_TYPE_MAP = {
     "solid": ("solid", "SolidMechanics", "Solid Mechanics"),
     "heattransfer": ("ht", "HeatTransfer", "Heat Transfer in Solids"),
     "ht": ("ht", "HeatTransfer", "Heat Transfer in Solids"),
+    "heattransferfluids": ("ht", "HeatTransferInSolidsAndFluids", "Heat Transfer in Solids and Fluids"),
+    "htf": ("ht", "HeatTransferInSolidsAndFluids", "Heat Transfer in Solids and Fluids"),
+    "conjugateheattransfer": ("ht", "HeatTransferInSolidsAndFluids", "Heat Transfer in Solids and Fluids"),
+    "cht": ("ht", "HeatTransferInSolidsAndFluids", "Heat Transfer in Solids and Fluids"),
     "laminarflow": ("spf", "LaminarFlow", "Laminar Flow"),
     "spf": ("spf", "LaminarFlow", "Laminar Flow"),
 }
@@ -278,6 +283,8 @@ def register_physics_tools(mcp: FastMCP) -> None:
         - "ElectricCurrents" or "ec": Electric current conduction
         - "SolidMechanics" or "solid": Structural stress analysis
         - "HeatTransfer" or "ht": Heat transfer in solids
+        - "HeatTransferInSolidsAndFluids" or "htf": heat transfer in solids AND fluids
+          (conjugate heat transfer; the kernel type "ConjugateHeatTransfer" does NOT exist)
         - "LaminarFlow" or "spf": Fluid dynamics
         
         Args:
@@ -554,6 +561,9 @@ def register_physics_tools(mcp: FastMCP) -> None:
         - "FluidStructureInteraction": Couples Fluid Flow and Solid Mechanics
         - "ElectromechanicalForces": Couples Electrostatics and Solid Mechanics
         - "JouleHeating": Couples Electric Currents and Heat Transfer
+        - "NonIsothermalFlow": Couples Laminar Flow and Heat Transfer in
+          Solids and Fluids (aliases accepted: "nitf", "cht",
+          "conjugateheattransfer")
         
         Args:
             coupling_type: Type of multiphysics coupling
@@ -571,6 +581,14 @@ def register_physics_tools(mcp: FastMCP) -> None:
             }
         
         try:
+            aliases = {
+                "nitf": "NonIsothermalFlow",
+                "nonisothermal": "NonIsothermalFlow",
+                "nonisothermalflow": "NonIsothermalFlow",
+                "conjugateheattransfer": "NonIsothermalFlow",
+                "cht": "NonIsothermalFlow",
+            }
+            coupling_type = aliases.get(coupling_type.lower(), coupling_type)
             coupling_node = model.create("multiphysics", coupling_type)
             
             return {
@@ -1337,3 +1355,131 @@ def register_physics_tools(mcp: FastMCP) -> None:
             return {"success": False, "error": f"Failed to create boundary condition: {str(e)}"}
 
 
+    @mcp.tool()
+    def physics_set_property(
+        physics_name: str,
+        prop: str,
+        value: Union[bool, int, float, str, list],
+        feature_tag: Optional[str] = None,
+        model_name: Optional[str] = None,
+    ) -> dict:
+        """
+        Set an arbitrary property on a physics interface or one of its features.
+
+        This is the generic escape hatch when no structured tool covers a
+        setting (e.g. a heat source Q0 on a domain feature).
+
+        Args:
+            physics_name: Physics interface name or tag (e.g. "ht")
+            prop: Property name (e.g. "Q0", "T0", "Reluctivity")
+            value: bool / int / float / str / list. Ints are wrapped in JInt
+                automatically (JPype overload ambiguity); lists pass through.
+            feature_tag: Feature tag to set on. Omit to set on the interface
+                node itself.
+            model_name: Model name (default: current model)
+
+        Returns:
+            Echo of the assignment
+        """
+        from jpype import JInt
+
+        model = session_manager.get_model(model_name)
+        if model is None:
+            return {"success": False, "error": f"Model not found: {model_name or 'no current model'}"}
+
+        try:
+            comp, physics, _avail = _find_physics(model, physics_name)
+            if physics is None:
+                return {"success": False, "error": f"Physics not found: {physics_name}"}
+            node = physics.feature(feature_tag) if feature_tag else physics
+            if isinstance(value, bool):
+                converted = value
+            elif isinstance(value, int):
+                converted = JInt(value)
+            elif isinstance(value, list):
+                converted = [
+                    JInt(v) if isinstance(v, int) and not isinstance(v, bool) else v
+                    for v in value
+                ]
+            else:
+                converted = value
+            node.set(prop, converted)
+            return {
+                "success": True,
+                "physics": physics_name,
+                "feature": feature_tag or "(interface)",
+                "property": prop,
+                "value": str(value),
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Failed to set {prop}: {str(e)}"}
+
+    @mcp.tool()
+    def variable_create(
+        variables: dict,
+        descriptions: Optional[dict] = None,
+        component_name: Optional[str] = None,
+        model_name: Optional[str] = None,
+    ) -> dict:
+        """
+        Create model variables (Definitions > Variables), e.g. derived
+        quantities used by other expressions or evaluations.
+
+        Args:
+            variables: name -> expression mapping,
+                e.g. {"T_chip_max": "maxop_T(T)", "R_th": "(T_chip_max - T_in)/P_heat"}
+            descriptions: optional name -> description mapping
+            component_name: Component to add variables to (default: first component)
+            model_name: Model name (default: current model)
+
+        Returns:
+            Created variable-group tag and the variable names
+        """
+        model = session_manager.get_model(model_name)
+        if model is None:
+            return {"success": False, "error": f"Model not found: {model_name or 'no current model'}"}
+
+        try:
+            jm = model.java
+            comp = None
+            for candidate in jm.component():
+                tag = candidate.tag()
+                if component_name and tag != component_name:
+                    continue
+                comp = candidate
+                break
+            if comp is None:
+                return {"success": False, "error": f"Component not found: {component_name or 'no components'}"}
+
+            existing = set()
+            try:
+                for t in comp.variable().tags():
+                    existing.add(str(t))
+            except Exception:
+                pass
+            index = 1
+            while "var{}".format(index) in existing:
+                index += 1
+            group_tag = "var{}".format(index)
+
+            group = comp.variable().create(group_tag)
+            group.label("AI Variables")
+            names = []
+            for name, expr in variables.items():
+                group.set(str(name), str(expr))
+                if descriptions and str(name) in descriptions:
+                    try:
+                        group.description(str(name), str(descriptions[str(name)]))
+                    except Exception:
+                        pass
+                names.append(str(name))
+
+            return {
+                "success": True,
+                "group": group_tag,
+                "component": comp.tag(),
+                "variables": names,
+                "count": len(names),
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Failed to create variables: {str(e)}"}
