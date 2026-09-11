@@ -33,9 +33,17 @@ echo First run detected - setting up the Python environment.
 echo This installs dependencies once and takes 3-5 minutes.
 echo.
 set "BASE_PY="
-where python >nul 2>nul && set "BASE_PY=python"
-if "%BASE_PY%"=="" (
-    where py >nul 2>nul && set "BASE_PY=py -3"
+REM Prefer a Python that has wheels for the pinned numpy line (3.10-3.12).
+py -3.12 -c "print()" >nul 2>nul
+if not errorlevel 1 if not defined BASE_PY set "BASE_PY=py -3.12"
+py -3.11 -c "print()" >nul 2>nul
+if not errorlevel 1 if not defined BASE_PY set "BASE_PY=py -3.11"
+py -3.10 -c "print()" >nul 2>nul
+if not errorlevel 1 if not defined BASE_PY set "BASE_PY=py -3.10"
+py -3.13 -c "print()" >nul 2>nul
+if not errorlevel 1 if not defined BASE_PY set "BASE_PY=py -3.13"
+if not defined BASE_PY (
+    where python >nul 2>nul && set "BASE_PY=python"
 )
 if "%BASE_PY%"=="" (
     echo [!] Python was not found on this computer.

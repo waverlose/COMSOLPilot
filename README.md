@@ -45,7 +45,6 @@ AI 与你的 Desktop 连接同一个服务端：AI 建的几何、材料、物�
 | One-click launcher / 一键启动 | first-run bootstrap (venv + deps), GUI/headless modes, custom port 首次运行自动配环境，GUI/无头模式，端口自定义 |
 | Multi-client / 多客户端 | register into 9 MCP clients on demand — nothing is written without your explicit command 按需注册进 9 种 MCP 客户端，未经指令绝不写入任何配置 |
 | Self-healing / 自愈 | connector detects a dead/restarted server and reconnects on its own 连接器自动识别服务端重启并重连 |
-| Easter eggs / 彩蛋 | a binary signature in model parameters + a 15x58 digit-matrix screen in the results tables 参数表里的二进制电报 + 结果表格里的 15x58 点阵屏 |
 
 ---
 
@@ -124,25 +123,6 @@ analytic formula to roughly eight decimal places.
 
 ---
 
-## The signature / 关于模型里的彩蛋
-
-Two one-shot marks are written into the **current model** when the session
-connects — static, written once, zero runtime cost:
-
-会话连接后会在**当前模型**里写入两样一次性的印记——静态、写完即止、零开销：
-
-1. **Parameters `B00`-`B30`** in the model parameters — the UTF-8 binary of a
-   short motto (one byte per parameter, e.g. `B00 = 11100100`).
-   参数表里的 `B00`-`B30`：一句签名的 UTF-8 二进制电报，一个参数一个字节。
-2. **Table `COMSOLPilot Screen`** in the results — a 15 x 58 grid of 0/9 where
-   the 9s draw the motto as a bitmap. A table is just a low-res screen.
-   结果表格里的 15x58 矩阵：9 的笔画拼出点阵字。表格本身就是一块低分辨率屏幕。
-
-Delete them anytime; they come back on the next connect. Customize the motto
-in `src/tools/telemetry.py` (`_MESSAGE` / `_SCREEN_TEXT`).
-随时可删，下次连接会重新写入。想改内容：`src/tools/telemetry.py` 里的 `_MESSAGE`
-和 `_SCREEN_TEXT`。
-
 ---
 
 ## Project layout / 目录结构
@@ -169,7 +149,7 @@ comsolpilot/
 | Client says "Not connected" / 客户端连不上 | Start the server **before** the connector, then re-trust it. The connector self-heals either way. 先启动服务端再信任连接器；连接器可自愈重连 |
 | Garbled banner glyphs / 字符乱码 | The launcher auto-switches to Windows Terminal. Install it from the Store if missing. 启动器会自动切到 Windows Terminal；没有就装一个 |
 | "Server is in use by another client" / 服务端被占用 | Transient GUI-sync contention — the tools retry internally. 属 GUI 同步的瞬时争用，工具内部已自动重试 |
-| Model prompts "save changes?" / 关模型提示保存 | Expected: the signature tables/params belong to the model. Save freely. 正常现象：签名印记属于模型的一部分，保存即可 |
+| Model prompts "save changes?" / 关模型提示保存 | Expected: the AI adds tables and parameters to the model. Save freely. 正常现象：AI 会在模型里添加表格和参数，保存即可 |
 | Port 2036 busy / 端口被占 | Menu option 3 (or `setport`) picks and syncs a new one. 菜单选 3 或 `setport` 换端口，自动同步客户端 |
 
 More guides / 更多指南: [docs/MCP_SETUP_CN.md](docs/MCP_SETUP_CN.md) ·
