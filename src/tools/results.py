@@ -368,6 +368,78 @@ def register_results_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return {"success": False, "error": f"Failed to rename tables: {str(e)}"}
 
+    def results_annotate(
+        text: str,
+        model_name: Optional[str] = None,
+    ) -> dict:
+        """
+        Put readable text into COMSOL Desktop via an annotation plot node.
+
+        Creates (or reuses) a 3D plot group labeled "COMSOLPilot" containing
+        one Annotation feature with your text. The text renders in the
+        Desktop graphics window when that plot is selected. Calling the tool
+        again updates the same annotation instead of accumulating nodes.
+
+        Args:
+            text: Text to display; multi-line works (newline-separated)
+            model_name: Model name (default: current model)
+
+        Returns:
+            Plot group tag, whether nodes were reused, and the stored text
+        """
+        model = session_manager.get_model(model_name)
+        if model is None:
+            return {
+                "success": False,
+                "error": f"Model not found: {model_name or 'no current model'}"
+            }
+
+        try:
+            jm = model.java
+            res = jm.result()
+            tags = [str(t) for t in res.tags()]
+            if "pg_comsolpilot" not in tags:
+                res.create("pg_comsolpilot", "PlotGroup3D")
+                created_group = True
+            else:
+                created_group = False
+            pg = jm.result("pg_comsolpilot")
+            try:
+                pg.label("COMSOLPilot")
+            except Exception:
+                pass
+
+            dataset_note = ""
+            try:
+                dtags = [str(t) for t in res.dataset().tags()]
+                if dtags:
+                    pg.set("data", dtags[0])
+                else:
+                    dataset_note = "no dataset available; annotation may not render until the model is solved"
+            except Exception as exc:
+                dataset_note = f"dataset binding skipped: {str(exc)[:80]}"
+
+            try:
+                ann = pg("ann1")
+                reused = True
+            except Exception:
+                ann = pg.create("ann1", "Annotation")
+                reused = False
+            ann.set("text", str(text))
+
+            return {
+                "success": True,
+                "plot_group": "pg_comsolpilot",
+                "label": "COMSOLPilot",
+                "created_group": created_group,
+                "annotation_reused": reused,
+                "text": str(text),
+                "dataset_note": dataset_note,
+                "hint": "Select the COMSOLPilot plot in Desktop to see the text in the graphics window.",
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Failed to annotate: {str(e)}"}
+
     def results_exports_list(model_name: Optional[str] = None) -> dict:
         """
         List all export nodes defined in a model.
