@@ -169,7 +169,7 @@ def _capabilities_payload() -> dict[str, Any]:
             "boundary_conditions": "Array of {tag, type, where, properties}. where is box, selection, or boundaries.",
             "where.box": "Object with xmin/xmax/ymin/ymax/zmin/zmax in meters and optional condition.",
             "mesh": "Object: tag='mesh1', size=1..9, run=true.",
-            "study": "Object: tag='std1', type='Stationary'|'TimeDependent'|'FrequencyDomain'|'Eigenfrequency', step_tag/tlist optional. tlist only for TimeDependent, e.g. 'range(0,0.1[s],1[s])'.",
+            "study": "Object: tag='std1', type='Stationary'|'TimeDependent'|'FrequencyDomain'|'Eigenfrequency', step_tag/tlist optional. tlist only for TimeDependent, e.g. 'range(0,0.1[s],1[s])' (COMSOL range order is start, step, stop).",
             "outputs": "Array of {name, type, expression, unit, raw=false}.",
         },
         "geometry": GEOMETRY_CAPABILITIES,
