@@ -368,6 +368,7 @@ def register_results_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return {"success": False, "error": f"Failed to rename tables: {str(e)}"}
 
+    @mcp.tool()
     def results_annotate(
         text: str,
         model_name: Optional[str] = None,
@@ -440,6 +441,7 @@ def register_results_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return {"success": False, "error": f"Failed to annotate: {str(e)}"}
 
+    @mcp.tool()
     def results_exports_list(model_name: Optional[str] = None) -> dict:
         """
         List all export nodes defined in a model.
