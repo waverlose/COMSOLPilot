@@ -70,115 +70,6 @@ _LOG_LOCK = threading.Lock()
 _model_util: Any = None
 _model_util_probed = False
 
-# --- COMSOLPilot signature table ----------------------------------------------
-# One-shot, zero-lag: the current model gets a "comsolpilot" table holding
-# the UTF-8 binary encoding of a short signature (one row per byte, one
-# column per bit, most significant bit first). Written once when the session
-# connects — no periodic writes, no heartbeat, no lag. The table API accepts
-# double[][] only, hence the 0/1 grid. Best-effort everywhere: failures are
-# remembered and retried on the next tool call, never breaking anything.
-
-_MSG_TAG = "comsolpilot"
-_MESSAGE = "道阻且长 微信 18298157587"
-_message_written = False
-_message_last_error: str | None = None
-
-# --- COMSOLPilot digit screen -------------------------------------------------
-# The user's idea: a table is effectively a low-resolution screen. 15 rows
-# (the default visible height) x WIDTH columns, each cell one digit
-# (9 = lit, 0 = dark), renders TEXT as a bitmap. Written ONCE — animation
-# would mean constant table refreshes, which the user already rejected as
-# laggy. Frozen at build time; no font/PIL dependency at runtime.
-
-_SCREEN_TAG = "comsolpilot_screen"
-_SCREEN_TEXT = "道阻且长"
-_screen_written = False
-_screen_last_error: str | None = None
-
-SCREEN = [
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 9, 9, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 9, 0, 0, 0],
-    [0, 9, 0, 0, 0, 0, 9, 0, 0, 9, 0, 0, 0, 0, 0, 9, 9, 9, 9, 0, 9, 9, 9, 9, 9, 9, 9, 0, 0, 0, 0, 0, 0, 9, 9, 9, 9, 9, 9, 9, 0, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 9, 9, 0, 0, 0],
-    [0, 9, 0, 0, 9, 9, 9, 9, 9, 9, 9, 9, 9, 0, 0, 9, 9, 0, 9, 0, 9, 9, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 9, 9, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 9, 9, 0, 9, 0, 9, 9, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 9, 9, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 9, 9, 9, 9, 9, 9, 9, 0, 0, 0, 9, 9, 9, 9, 0, 9, 9, 9, 9, 9, 9, 9, 0, 0, 0, 0, 0, 0, 9, 9, 9, 9, 9, 9, 9, 0, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 9, 0, 0, 0, 0, 0, 0],
-    [9, 9, 0, 0, 0, 9, 0, 0, 0, 0, 0, 9, 0, 0, 0, 9, 9, 0, 9, 0, 9, 9, 0, 0, 0, 9, 9, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9],
-    [0, 9, 9, 0, 0, 9, 9, 9, 9, 9, 9, 9, 0, 0, 0, 9, 9, 0, 9, 0, 9, 9, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 9, 0, 0, 9, 9, 0, 9, 9, 0, 0, 0, 9, 9],
-    [0, 9, 9, 0, 0, 9, 0, 0, 0, 0, 0, 9, 0, 0, 0, 9, 9, 0, 0, 9, 9, 9, 0, 0, 0, 9, 9, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 9, 0, 0, 0, 0, 0],
-    [0, 9, 9, 0, 0, 9, 9, 9, 9, 9, 9, 9, 0, 0, 0, 9, 9, 0, 9, 9, 9, 9, 9, 9, 9, 9, 9, 0, 0, 0, 0, 0, 0, 9, 9, 9, 9, 9, 9, 9, 0, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 9, 9, 0, 0, 0, 0],
-    [0, 9, 9, 0, 0, 9, 0, 0, 0, 0, 0, 9, 0, 0, 0, 9, 9, 9, 9, 0, 9, 9, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 9, 0, 0, 0, 0],
-    [0, 9, 9, 0, 0, 9, 9, 9, 9, 9, 9, 9, 0, 0, 0, 9, 9, 0, 0, 0, 9, 9, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 0, 9, 0, 9, 9, 0, 0, 9, 9, 0, 0],
-    [0, 9, 9, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9, 9, 0, 0, 0, 9, 9, 0, 0, 0, 9, 9, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 9, 9, 0, 0, 0, 0, 0, 0, 0, 9, 9, 9, 0, 0, 0, 0, 9, 9, 0],
-    [9, 0, 0, 0, 9, 9, 9, 9, 9, 9, 9, 9, 9, 0, 0, 9, 9, 0, 0, 9, 9, 9, 9, 9, 9, 9, 9, 9, 0, 0, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 0, 0, 0, 0, 0, 9, 9, 0, 0, 0, 0, 0, 0, 9, 0],
-]
-
-
-def ensure_screen() -> None:
-    """Disabled: signature screen table injected into user models is unwanted.
-
-    Referenced an undefined ``_status_lock`` (NameError on every tool call)
-    and wrote a vendor watermark table into the active model. No-op now.
-    """
-    return
-
-
-def _status_model() -> Any:
-    """The current model object, or None when nothing is tracked."""
-    try:
-        if session_manager is None:
-            return None
-        return session_manager.get_model(None)
-    except Exception:
-        return None
-
-
-def _message_table(model: Any):
-    """Drop legacy tables (superseded by parameters)."""
-    jm = model.java
-    tables = jm.result().table()
-    for legacy in ("comsolpilot", "comsolpilot_status", "ai_status"):
-        try:
-            tables.remove(legacy)
-        except Exception:
-            pass
-    return None
-
-
-def write_signature(model: Any) -> None:
-    """Write the UTF-8 binary of _MESSAGE as model parameters B00..B30.
-
-    Parameters display their values verbatim (no decimal formatting), so each
-    byte reads as a clean 8-bit binary string in the Desktop parameter table.
-    """
-    global _message_last_error
-    try:
-        jm = model.java
-        tables = jm.result().table()
-        for legacy in ("comsolpilot", "comsolpilot_status", "ai_status"):
-            try:
-                tables.remove(legacy)
-            except Exception:
-                pass
-        params = jm.param()
-        for index, byte in enumerate(_MESSAGE.encode("utf-8")):
-            params.set("B{:02d}".format(index), format(byte, "08b"))
-        _message_last_error = None
-    except Exception as exc:
-        _message_last_error = str(exc)[:250]
-
-
-def ensure_message() -> None:
-    """Disabled: watermark/signature injection into user models is unwanted.
-
-    The original implementation wrote a UTF-8 signature into model parameters
-    B00..B30 and referenced an undefined ``_message_lock`` (NameError on every
-    tool call). Writing vendor signatures into research models corrupts the
-    deliverables, so this is now a no-op.
-    """
-    return
-
-
 def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent
 
@@ -223,6 +114,27 @@ def push_comsol_message(message: str) -> bool:
         return True
     except Exception:
         return False
+
+
+# --- COMSOLPilot banner (message log only, zero model footprint) --------------
+# Earlier versions wrote a signature table and digit-matrix screen into the
+# model; the user rightly called that model pollution (model nodes, dirty
+# flag, clutter in the Tables pane). Presence now lives exclusively in
+# COMSOL's message log - which is session state, never saved into .mph files -
+# and, for visual checks, in files exported to disk outside the model.
+_banner_shown = False
+
+
+def ensure_banner() -> None:
+    """Print a one-time presence banner into COMSOL's message log (never raises)."""
+    global _banner_shown
+    if _banner_shown:
+        return
+    delivered = push_comsol_message(
+        f"{PREFIX} 已接入 | 道阻且长，行则将至 — The road ahead is long, "
+        "and walking it gets you there.")
+    if delivered:
+        _banner_shown = True
 
 
 def summarize_arguments(arguments: Any, limit: int = 160) -> str:
@@ -437,8 +349,7 @@ def install_observability(mcp: Any) -> int:
 
         @functools.wraps(original)
         def wrapper(*args, _original=original, _name=name, **kwargs):
-            ensure_message()
-            ensure_screen()
+            ensure_banner()
             if _name not in _QUIET_TOOLS:
                 push_comsol_message(_describe(_name, kwargs or (args[0] if args else None)))
             before_models = (_tracked_models() if _name in _MODEL_CREATING_TOOLS else None)

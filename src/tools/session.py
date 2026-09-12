@@ -509,10 +509,10 @@ class SessionManager:
                 result = self.connect(port=port, host=host, wait=remaining, threaded=False)
                 if result.get("success"):
                     try:
-                        # 一次性签名表：连接成功后把二进制签名写入当前模型
-                        from ..tools.telemetry import ensure_message
+                        # 连接成功后在消息日志打一条存在横幅（不写模型）
+                        from ..tools.telemetry import ensure_banner
 
-                        ensure_message()
+                        ensure_banner()
                     except Exception:
                         pass
                 return result
