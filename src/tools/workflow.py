@@ -202,6 +202,7 @@ class SpecValidator:
         self._union()
         self._materials()
         self._physics()
+        self._mesh()
         self._study()
         self._outputs()
         return {"valid": not self.errors, "errors": self.errors, "warnings": self.warnings}
@@ -303,6 +304,17 @@ class SpecValidator:
             capability = PHYSICS_CAPABILITIES[physics_tag]
             for bc_index, bc in enumerate(_as_list(physics.get("boundary_conditions"))):
                 self._boundary_condition(bc, capability, f"{path}.boundary_conditions[{bc_index}]")
+
+    def _mesh(self) -> None:
+        mesh = self.spec.get("mesh", {})
+        if not isinstance(mesh, dict):
+            self.errors.append("mesh must be an object.")
+            return
+        size = mesh.get("size")
+        if size is not None:
+            if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= 9:
+                self.errors.append(
+                    f"mesh.size must be an integer in 1..9 (COMSOL predefined sizes), got {size!r}.")
 
     def _study(self) -> None:
         study = self.spec.get("study", {"type": "Stationary"})
@@ -771,13 +783,34 @@ class JavaWorkflowExecutor:
                     )
         self.log.append({"step": "preflight", "checked": True})
 
-    def _verify_solution(self) -> str | None:
-        """Check the solved field against the boundary values that were imposed.
+    # Boundary conditions that impose the verified field directly (Dirichlet).
+    DIRICHLET_FIELD_VALUES: dict[tuple[str, str], str] = {
+        ("HeatTransfer", "TemperatureBoundary"): "T0",
+        ("HeatTransfer", "Temperature"): "T0",
+        ("Electrostatics", "ElectricPotential"): "V0",
+    }
 
-        Returns None when the solution is consistent, or when the model cannot be
-        checked automatically. Otherwise returns a human-readable violation.
+    def _verify_solution(self) -> str | None:
+        """Check a pure-Dirichlet steady solution against its imposed values.
+
+        Only problems whose boundary data consists entirely of field-imposing
+        (Dirichlet) conditions are checked, because only there does the
+        maximum principle bound the solution by the imposed values. Models
+        with flux, convective, flow, load, or charge boundary conditions, and
+        transient/frequency-domain studies, are skipped: their fields
+        legitimately leave the imposed range, and checking them produced false
+        "violates its own boundary data" errors (measured 2026-09-12 on a
+        transient heat-flux run whose solution was physically correct).
+
+        Returns None when the solution is consistent or cannot be checked
+        automatically; otherwise a human-readable violation.
         """
         import numpy as np
+
+        study = self.spec.get("study", {})
+        study_type = study.get("type", "Stationary") if isinstance(study, dict) else "Stationary"
+        if study_type not in ("Stationary", "Eigenfrequency"):
+            return None
 
         for physics_spec in _as_list(self.spec.get("physics")):
             if not isinstance(physics_spec, dict):
@@ -791,13 +824,32 @@ class JavaWorkflowExecutor:
                 continue
 
             imposed: list[float] = []
+            dirichlet_only = True
             for bc in _as_list(physics_spec.get("boundary_conditions")):
                 if not isinstance(bc, dict):
                     continue
-                for value in (bc.get("properties") or {}).values():
-                    number = _leading_number(value)
-                    if number is not None:
-                        imposed.append(number)
+                bc_type = str(bc.get("type", ""))
+                prop_name = self.DIRICHLET_FIELD_VALUES.get(
+                    (capability.interface, bc_type))
+                if prop_name is None:
+                    if capability.interface == "Electrostatics" and bc_type == "Ground":
+                        imposed.append(0.0)
+                        continue
+                    dirichlet_only = False
+                    break
+                number = _leading_number((bc.get("properties") or {}).get(prop_name))
+                if number is None:
+                    dirichlet_only = False
+                    break
+                imposed.append(number)
+            if not dirichlet_only:
+                self.log.append({
+                    "step": "verify_skipped",
+                    "physics": capability.tag,
+                    "reason": "non-Dirichlet boundary conditions present; the field is "
+                              "not bounded by the imposed values",
+                })
+                continue
             if len(imposed) < 2:
                 continue
 
