@@ -403,6 +403,20 @@ def _new_model_notice(before: set[str]) -> str | None:
     )
 
 
+# COMSOL's server allows one client at a time. When the human works in
+# Desktop while the AI works through the connector, one side hits
+# "Server is in use by another client". The wrapper retries such failures
+# with backoff instead of surfacing them immediately.
+_BUSY_MARKERS = ("Server is in use by another client", "被其他客户端使用")
+_BUSY_HINT = ("COMSOL 服务端同一时刻只允许一个客户端操作——你（用户）可能正在 "
+              "COMSOL Desktop 里操作。请稍等几秒后重试，或先告诉 AI 等你操作完。")
+_NO_AUTORETRY_TOOLS = {"workflow_execute_spec"}
+
+
+def _is_busy(text: str) -> bool:
+    return any(marker in text for marker in _BUSY_MARKERS)
+
+
 def install_observability(mcp: Any) -> int:
     """Wrap every registered tool with message + call-log instrumentation.
 
@@ -429,14 +443,36 @@ def install_observability(mcp: Any) -> int:
                 push_comsol_message(_describe(_name, kwargs or (args[0] if args else None)))
             before_models = (_tracked_models() if _name in _MODEL_CREATING_TOOLS else None)
             started = time.perf_counter()
-            try:
-                result = _original(*args, **kwargs)
-            except Exception as exc:
-                record_tool_call(_name, kwargs, "error",
-                                 (time.perf_counter() - started) * 1000.0, str(exc))
-                if _name not in _QUIET_TOOLS:
-                    push_comsol_message(f"{PREFIX} < {_name} FAILED: {str(exc)[:120]}")
-                raise
+            attempts = 0
+            while True:
+                try:
+                    result = _original(*args, **kwargs)
+                except Exception as exc:
+                    if (_name not in _NO_AUTORETRY_TOOLS and attempts < 2
+                            and _is_busy(str(exc))):
+                        attempts += 1
+                        time.sleep(1.5 * attempts)
+                        if _name not in _QUIET_TOOLS:
+                            push_comsol_message(
+                                f"{PREFIX} ~ {_name} server busy, retry {attempts}/2")
+                        continue
+                    record_tool_call(_name, kwargs, "error",
+                                     (time.perf_counter() - started) * 1000.0, str(exc))
+                    if _name not in _QUIET_TOOLS:
+                        push_comsol_message(f"{PREFIX} < {_name} FAILED: {str(exc)[:120]}")
+                    raise
+                failed = isinstance(result, dict) and result.get("success") is False
+                if (failed and _name not in _NO_AUTORETRY_TOOLS and attempts < 2
+                        and _is_busy(str(result.get("error", "")))):
+                    attempts += 1
+                    time.sleep(1.5 * attempts)
+                    if _name not in _QUIET_TOOLS:
+                        push_comsol_message(
+                            f"{PREFIX} ~ {_name} server busy, retry {attempts}/2")
+                    continue
+                break
+            if (failed and isinstance(result, dict) and _is_busy(str(result.get("error", "")))):
+                result["hint"] = _BUSY_HINT
             elapsed = (time.perf_counter() - started) * 1000.0
             failed = isinstance(result, dict) and result.get("success") is False
             record_tool_call(_name, kwargs, "failed" if failed else "ok", elapsed,

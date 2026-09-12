@@ -142,17 +142,25 @@ class SessionManager:
             # Some MPh client modes expose names but not model objects until loaded.
             pass
 
-    def retry_comsol_busy(self, operation, attempts: int = 5, delay: float = 0.35):
-        """Retry short COMSOL server-busy windows caused by GUI multi-client sync."""
+    def retry_comsol_busy(self, operation, attempts: int = 6, delay: float = 0.4,
+                          backoff: float = 1.6):
+        """Retry COMSOL server-busy windows caused by GUI multi-client sync.
+
+        Desktop interactions come in short bursts; a ~10 s exponential window
+        clears almost all of them without surfacing an error to the AI.
+        """
         last_error = None
+        current = delay
         for _ in range(attempts):
             try:
                 return operation()
             except Exception as exc:
                 last_error = exc
-                if "Server is in use by another client" not in str(exc):
+                if ("Server is in use by another client" not in str(exc)
+                        and "被其他客户端使用" not in str(exc)):
                     raise
-                time.sleep(delay)
+                time.sleep(current)
+                current = min(current * backoff, 5.0)
         raise last_error
 
     def _server_is_listening(self, host: str, port: int, timeout: float = 1.0) -> bool:
