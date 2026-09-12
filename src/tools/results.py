@@ -293,6 +293,81 @@ def register_results_tools(mcp: FastMCP) -> None:
             return {"success": False, "error": f"Failed to export image: {str(e)}"}
     
     @mcp.tool()
+    def results_label_tables(
+        label: Optional[str] = None,
+        only_default: bool = True,
+        model_name: Optional[str] = None,
+    ) -> dict:
+        """
+        Rename table nodes in the Tables pane of COMSOL Desktop.
+
+        COMSOL auto-names evaluated tables with localized defaults like
+        "Table 1" / "表格 1". With a label configured (launcher menu 5 or
+        workspace/settings.json key "table_label", default "COMSOLPilot"),
+        this renames those tables to "<label>", "<label> 2", ... so the
+        Tables pane shows recognizable names instead of generic ones.
+
+        Args:
+            label: Custom label; omit to use the launcher-configured one
+            only_default: Only rename tables still carrying default names
+                ("Table N" / "表格 N"); false renames every table in order
+            model_name: Model name (default: current model)
+
+        Returns:
+            List of renames applied
+        """
+        import re
+
+        model = session_manager.get_model(model_name)
+        if model is None:
+            return {
+                "success": False,
+                "error": f"Model not found: {model_name or 'no current model'}"
+            }
+
+        final = (label or "").strip() or "COMSOLPilot"
+        if not label:
+            try:
+                settings_path = (
+                    pathlib.Path(__file__).resolve().parent.parent.parent
+                    / "workspace" / "settings.json")
+                cfg = json.loads(settings_path.read_text(encoding="utf-8"))
+                final = str(cfg.get("table_label") or "COMSOLPilot")
+            except Exception:
+                pass
+
+        try:
+            table_list = model.java.result().table()
+            pattern = re.compile(r"^(?:Table|表格)\s*\d+$", re.IGNORECASE)
+            renames = []
+            counter = 0
+            used: set[str] = set()
+            for tag in table_list.tags():
+                table = model.java.result().table(str(tag))
+                try:
+                    current = str(table.label())
+                except Exception:
+                    current = str(tag)
+                if only_default and not pattern.match(current):
+                    continue
+                counter += 1
+                new = final if counter == 1 else f"{final} {counter}"
+                while new in used:
+                    counter += 1
+                    new = f"{final} {counter}"
+                used.add(new)
+                table.label(new)
+                renames.append({"tag": str(tag), "from": current, "to": new})
+
+            return {
+                "success": True,
+                "label": final,
+                "renamed": renames,
+                "count": len(renames),
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Failed to rename tables: {str(e)}"}
+
     def results_exports_list(model_name: Optional[str] = None) -> dict:
         """
         List all export nodes defined in a model.

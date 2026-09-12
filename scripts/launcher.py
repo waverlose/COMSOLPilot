@@ -203,10 +203,41 @@ def action_setport() -> None:
     pause()
 
 
+def table_label() -> str:
+    """The label AI-created tables get (workspace/settings.json table_label)."""
+    try:
+        cfg = json.loads((ROOT / "workspace" / "settings.json").read_text(encoding="utf-8"))
+        return str(cfg.get("table_label") or "COMSOLPilot")
+    except Exception:
+        return "COMSOLPilot"
+
+
 MENU = BOLD + "  [1]" + RESET + "  GUI mode        server + COMSOL Desktop (watch the solve)\n" \
      + BOLD + "  [2]" + RESET + "  Headless mode   server only\n" \
      + BOLD + "  [3]" + RESET + "  Port setup\n" \
+     + BOLD + "  [5]" + RESET + "  Table label     rename AI-created tables (current: {label})\n" \
      + BOLD + "  [0]" + RESET + "  Exit\n"
+
+
+def action_tablelabel() -> None:
+    print()
+    print("  Current label for AI-created tables: " + BOLD + table_label() + RESET)
+    try:
+        value = input(YELLOW + "  New label (Enter = reset to COMSOLPilot): " + RESET).strip()
+    except (EOFError, KeyboardInterrupt):
+        return
+    label = value or "COMSOLPilot"
+    settings = ROOT / "workspace" / "settings.json"
+    try:
+        cfg = json.loads(settings.read_text(encoding="utf-8")) if settings.exists() else {}
+    except Exception:
+        cfg = {}
+    cfg["table_label"] = label
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(GREEN + f"  Table label set to: {label}" + RESET)
+    print(GREY + "  Takes effect the next time the AI creates/renames tables." + RESET)
+    pause()
 
 
 def draw_screen(animate: bool = False) -> None:
@@ -215,9 +246,10 @@ def draw_screen(animate: bool = False) -> None:
         animate_banner()
     else:
         print(CYAN + BANNER + RESET)
-    print("  " + BOLD + "Port:" + RESET + " " + resolved_port())
+    print("  " + BOLD + "Port:" + RESET + " " + resolved_port()
+          + "   " + BOLD + "Table label:" + RESET + " " + table_label())
     print()
-    print(MENU)
+    print(MENU.format(label=table_label()))
 
 
 def main() -> int:
@@ -236,6 +268,8 @@ def main() -> int:
             action_start(open_desktop=False)
         elif choice == "3":
             action_setport()
+        elif choice == "5":
+            action_tablelabel()
         elif choice in ("0", "q", "Q"):
             return 0
         else:
