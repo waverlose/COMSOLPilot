@@ -223,7 +223,22 @@ def register_study_tools(mcp: FastMCP) -> None:
                 "error": "Another solving operation is already in progress.",
                 "current_progress": progress,
             }
-        
+
+        # Fail fast with the real list of study tags: MPh's async solve used to
+        # die inside the worker thread with a bare "study not found".
+        try:
+            if study_name:
+                tags = [str(study.tag()) for study in model.java.study()]
+                if study_name not in tags:
+                    return {
+                        "success": False,
+                        "error": f"Study not found: {study_name}",
+                        "available_studies": tags,
+                        "hint": "Pass one of available_studies (the study tag).",
+                    }
+        except Exception:
+            pass
+
         try:
             started = async_solver.start_solve(model, study_name)
             if started:

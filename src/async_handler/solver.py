@@ -119,8 +119,15 @@ class AsyncSolver:
                 if self._cancel_flag:
                     self._set_cancelled()
                     return
-                
-                model.solve(study_name)
+
+                # Use the Java tag directly: MPh's high-level solve path looks
+                # studies up by localized label, which fails with "study not
+                # found" on non-English UIs (the same reason study_solve, the
+                # synchronous tool, calls the Java API). Keep both paths equal.
+                if study_name:
+                    model.java.study(study_name).run()
+                else:
+                    model.solve(study_name)
                 
                 if self._cancel_flag:
                     self._set_cancelled()
@@ -138,11 +145,24 @@ class AsyncSolver:
             except Exception as e:
                 error_msg = str(e)
                 tb = traceback.format_exc()
-                
+
+                # An unhelpful "study not found" hides which tags exist; list
+                # them so the caller can retry with a valid one immediately.
+                available = ""
+                try:
+                    tags = [str(study.tag()) for study in model.java.study()]
+                    available = ", ".join(tags) if tags else "(none)"
+                except Exception:
+                    available = "(unavailable)"
+
                 with self._lock:
                     self._progress.status = SolverStatus.FAILED
                     self._progress.error = error_msg
-                    self._progress.message = f"Solving failed: {error_msg}"
+                    self._progress.message = (
+                        f"Solving failed: {error_msg} "
+                        f"[model={model.name() if hasattr(model, 'name') else '?'} "
+                        f"requested study={study_name!r} available studies={available}]"
+                    )
                     self._progress.end_time = datetime.now()
                 
                 if progress_callback:
