@@ -1,6 +1,8 @@
 """Mesh tools for COMSOLPilot."""
 
 from typing import Optional
+from typing import Optional, Sequence
+
 from mcp.server.fastmcp import FastMCP
 
 from .session import session_manager
