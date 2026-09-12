@@ -15,6 +15,7 @@ def register_study_tools(mcp: FastMCP) -> None:
         study_name: str = "std1",
         study_type: str = "Stationary",
         step_tag: Optional[str] = None,
+        tlist: Optional[str] = None,
         model_name: Optional[str] = None
     ) -> dict:
         """
@@ -40,10 +41,10 @@ def register_study_tools(mcp: FastMCP) -> None:
             }
         
         supported = {
-            "Stationary": "stat",
-            "TimeDependent": "time",
-            "FrequencyDomain": "freq",
-            "Eigenfrequency": "eig",
+            "Stationary": {"step": "stat", "comsol_type": "Stationary"},
+            "TimeDependent": {"step": "time", "comsol_type": "Transient"},
+            "FrequencyDomain": {"step": "freq", "comsol_type": "Frequency"},
+            "Eigenfrequency": {"step": "eig", "comsol_type": "Eigenfrequency"},
         }
         if study_type not in supported:
             return {
@@ -62,19 +63,27 @@ def register_study_tools(mcp: FastMCP) -> None:
                 study = jm.study().create(study_name)
                 created_study = True
             
-            tag = step_tag or supported[study_type]
+            tag = step_tag or supported[study_type]["step"]
             existing_steps = {step.tag(): step for step in study.feature()}
             created_step = False
             if tag in existing_steps:
                 step = existing_steps[tag]
             else:
-                step = study.feature().create(tag, study_type)
+                step = study.feature().create(tag, supported[study_type]["comsol_type"])
                 created_step = True
+
+            if tlist:
+                comsol_type = supported[study_type]["comsol_type"]
+                if comsol_type != "Transient":
+                    return {"success": False,
+                            "error": "tlist is only valid for TimeDependent studies."}
+                step.set("tlist", str(tlist))
             
             return {
                 "success": True,
                 "study": study.tag(),
                 "study_type": study_type,
+                "tlist": tlist,
                 "step": step.tag(),
                 "created_study": created_study,
                 "created_step": created_step,

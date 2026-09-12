@@ -66,6 +66,10 @@ PHYSICS_TYPE_MAP = {
     "cht": ("ht", "HeatTransferInSolidsAndFluids", "Heat Transfer in Solids and Fluids"),
     "laminarflow": ("spf", "LaminarFlow", "Laminar Flow"),
     "spf": ("spf", "LaminarFlow", "Laminar Flow"),
+    "transportofdilutedspecies": ("tds", "TransportOfDilutedSpecies", "Transport of Diluted Species"),
+    "tds": ("tds", "TransportOfDilutedSpecies", "Transport of Diluted Species"),
+    "magneticfields": ("mf", "MagneticFields", "Magnetic Fields"),
+    "mf": ("mf", "MagneticFields", "Magnetic Fields"),
 }
 
 

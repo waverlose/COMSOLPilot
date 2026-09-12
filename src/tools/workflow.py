@@ -54,9 +54,9 @@ class PhysicsCapability:
 
 
 GEOMETRY_CAPABILITIES: dict[str, dict[str, Any]] = {
-    "block": {"comsol_type": "Block", "required": ["tag", "position", "size"]},
-    "cylinder": {"comsol_type": "Cylinder", "required": ["tag", "position", "radius", "height"]},
-    "sphere": {"comsol_type": "Sphere", "required": ["tag", "position", "radius"]},
+    "block": {"comsol_type": "Block", "required": ["tag", "position", "size"], "dims": (2, 3)},
+    "cylinder": {"comsol_type": "Cylinder", "required": ["tag", "position", "radius", "height"], "dims": (3,)},
+    "sphere": {"comsol_type": "Sphere", "required": ["tag", "position", "radius"], "dims": (3,)},
 }
 
 PHYSICS_CAPABILITIES: dict[str, PhysicsCapability] = {
@@ -135,10 +135,13 @@ PHYSICS_ALIAS_TO_TAG = {
 }
 
 STUDY_CAPABILITIES = {
-    "Stationary": {"default_step": "stat"},
-    "TimeDependent": {"default_step": "time"},
-    "FrequencyDomain": {"default_step": "freq"},
-    "Eigenfrequency": {"default_step": "eig"},
+    # comsol_type is the real kernel step name. The old code passed the MCP
+    # alias straight to feature().create(), which fails for Transient/Frequency
+    # ("Operation cannot be created in this context").
+    "Stationary": {"default_step": "stat", "comsol_type": "Stationary"},
+    "TimeDependent": {"default_step": "time", "comsol_type": "Transient"},
+    "FrequencyDomain": {"default_step": "freq", "comsol_type": "Frequency"},
+    "Eigenfrequency": {"default_step": "eig", "comsol_type": "Eigenfrequency"},
 }
 
 OUTPUT_CAPABILITIES = {"summary", "field", "max", "min", "global", "point"}
@@ -153,6 +156,9 @@ def _as_list(value: Any) -> list[Any]:
 
 
 def _capabilities_payload() -> dict[str, Any]:
+    from .physics import PHYSICS_TYPE_MAP
+
+    addable_tags = {entry[0] for entry in PHYSICS_TYPE_MAP.values()}
     return {
         "spec_schema": {
             "model": "Object: name, dimension=2|3, component='comp1', geometry='geom1'",
@@ -163,7 +169,7 @@ def _capabilities_payload() -> dict[str, Any]:
             "boundary_conditions": "Array of {tag, type, where, properties}. where is box, selection, or boundaries.",
             "where.box": "Object with xmin/xmax/ymin/ymax/zmin/zmax in meters and optional condition.",
             "mesh": "Object: tag='mesh1', size=1..9, run=true.",
-            "study": "Object: tag='std1', type='Stationary', step_tag optional.",
+            "study": "Object: tag='std1', type='Stationary'|'TimeDependent'|'FrequencyDomain'|'Eigenfrequency', step_tag/tlist optional. tlist only for TimeDependent, e.g. 'range(0,0.1[s],1[s])'.",
             "outputs": "Array of {name, type, expression, unit, raw=false}.",
         },
         "geometry": GEOMETRY_CAPABILITIES,
@@ -172,6 +178,7 @@ def _capabilities_payload() -> dict[str, Any]:
                 "interface": cap.interface,
                 "label": cap.label,
                 "aliases": list(cap.aliases),
+                "addable": tag in addable_tags,
                 "boundary_conditions": cap.boundary_conditions,
             }
             for tag, cap in PHYSICS_CAPABILITIES.items()
@@ -232,6 +239,12 @@ class SpecValidator:
             for key in GEOMETRY_CAPABILITIES[feature_type]["required"]:
                 if key not in feature:
                     self.errors.append(f"{path}.{key} is required.")
+            dimension = self.spec.get("model", {}).get("dimension", 3)
+            allowed_dims = GEOMETRY_CAPABILITIES[feature_type]["dims"]
+            if dimension not in allowed_dims:
+                self.errors.append(
+                    f"{path}.type '{feature_type}' needs model.dimension in "
+                    f"{sorted(allowed_dims)}, but model.dimension is {dimension}.")
             if feature_type == "block":
                 self._vector(feature, "position", 3, path)
                 self._vector(feature, "size", 3, path)
@@ -298,6 +311,14 @@ class SpecValidator:
             return
         if study.get("type", "Stationary") not in STUDY_CAPABILITIES:
             self.errors.append(f"study.type must be one of {sorted(STUDY_CAPABILITIES)}.")
+            return
+        tlist = study.get("tlist")
+        if tlist is not None:
+            comsol_type = STUDY_CAPABILITIES[study["type"]].get("comsol_type")
+            if comsol_type != "Transient":
+                self.errors.append("study.tlist is only valid when study.type is TimeDependent.")
+            elif not isinstance(tlist, str) or not tlist.strip():
+                self.errors.append("study.tlist must be a non-empty string, e.g. 'range(0,0.1[s],1[s])'.")
 
     def _outputs(self) -> None:
         outputs = self.spec.get("outputs", [])
@@ -625,18 +646,32 @@ class JavaWorkflowExecutor:
         )
         if mesh_spec.get("size") is not None:
             try:
-                mesh.autoMeshSize(int(mesh_spec["size"]))
-            except Exception:
-                self.log.append({"step": "mesh_size_warning", "tag": mesh.tag(), "requested_size": mesh_spec["size"]})
+                size = int(mesh_spec["size"])
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"mesh.size must be an integer in 1..9, got {mesh_spec['size']!r}.")
+            if not 1 <= size <= 9:
+                # Out-of-range values reach COMSOL and can blow the mesh up so
+                # hard that the JVM aborts and the whole MCP process dies.
+                raise ValueError(
+                    f"mesh.size must be in 1..9 (COMSOL predefined sizes), got {size}.")
+            session_manager.retry_comsol_busy(lambda: mesh.autoMeshSize(size))
         if mesh_spec.get("run", True):
-            mesh.run()
+            session_manager.retry_comsol_busy(lambda: mesh.run())
         self.log.append({"step": "mesh", "tag": mesh.tag(), "ran": mesh_spec.get("run", True)})
 
     def _study(self) -> str:
         study_spec = self.spec.get("study", {"type": "Stationary"})
         tag = study_spec.get("tag", "std1")
         study_type = study_spec.get("type", "Stationary")
-        step_tag = study_spec.get("step_tag") or STUDY_CAPABILITIES[study_type]["default_step"]
+        capability = STUDY_CAPABILITIES.get(study_type)
+        if capability is None:
+            raise ValueError(f"study.type must be one of {sorted(STUDY_CAPABILITIES)}.")
+        step_tag = study_spec.get("step_tag") or capability["default_step"]
+        comsol_type = capability["comsol_type"]
+        tlist = study_spec.get("tlist")
+        if tlist and comsol_type != "Transient":
+            raise ValueError("study.tlist is only valid when study.type is TimeDependent.")
         jm = self.model.java
         existing = {study.tag(): study for study in jm.study()}
         study = existing.get(tag) or session_manager.retry_comsol_busy(
@@ -644,8 +679,12 @@ class JavaWorkflowExecutor:
         )
         existing_steps = {step.tag(): step for step in study.feature()}
         if step_tag not in existing_steps:
-            session_manager.retry_comsol_busy(lambda: study.feature().create(step_tag, study_type))
-        self.log.append({"step": "study", "tag": tag, "type": study_type, "study_step": step_tag})
+            session_manager.retry_comsol_busy(lambda: study.feature().create(step_tag, comsol_type))
+        step = study.feature(step_tag)
+        if tlist:
+            session_manager.retry_comsol_busy(lambda: step.set("tlist", str(tlist)))
+        self.log.append({"step": "study", "tag": tag, "type": study_type,
+                         "study_step": step_tag, "tlist": tlist})
         return tag
 
     # Scalar field used to sanity-check a solved model, keyed by physics
@@ -883,7 +922,7 @@ def register_workflow_tools(mcp: FastMCP) -> None:
             Validation errors, warnings, and supported schema summary
         """
         result = SpecValidator(spec).validate()
-        return {"success": True, **result, "capabilities": _capabilities_payload()}
+        return {"success": True, **result}
 
     @mcp.tool()
     def workflow_execute_spec(
@@ -905,7 +944,7 @@ def register_workflow_tools(mcp: FastMCP) -> None:
         """
         validation = SpecValidator(spec).validate()
         if not validation["valid"]:
-            return {"success": False, "stage": "validate", **validation, "capabilities": _capabilities_payload()}
+            return {"success": False, "stage": "validate", **validation}
 
         # Push notifications/progress as stages complete. Clients that do not
         # support it simply ignore the notifications; the callback swallows any

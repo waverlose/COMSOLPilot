@@ -12,18 +12,16 @@ import re
 from typing import Any
 
 
-PHYSICS_TYPE_ENUM = [
-    "Electrostatics",
-    "es",
-    "ElectricCurrents",
-    "ec",
-    "SolidMechanics",
-    "solid",
-    "HeatTransfer",
-    "ht",
-    "LaminarFlow",
-    "spf",
-]
+from .physics import PHYSICS_TYPE_MAP
+from .workflow import STUDY_CAPABILITIES
+
+# Derived from PHYSICS_TYPE_MAP so the advertised enum can never drift from
+# what physics_add actually accepts (single source of truth).
+PHYSICS_TYPE_ENUM = sorted({
+    alias
+    for key, (_, interface, _label) in PHYSICS_TYPE_MAP.items()
+    for alias in (key, interface)
+})
 
 BOUNDARY_CONDITION_ENUM = [
     "Ground",
@@ -50,14 +48,13 @@ COUPLING_TYPE_ENUM = [
     "FluidStructureInteraction",
     "ElectromechanicalForces",
     "JouleHeating",
+    "NonIsothermalFlow",
+    "nitf",
+    "cht",
+    "conjugateheattransfer",
 ]
 
-STUDY_TYPE_ENUM = [
-    "Stationary",
-    "TimeDependent",
-    "FrequencyDomain",
-    "Eigenfrequency",
-]
+STUDY_TYPE_ENUM = sorted(STUDY_CAPABILITIES)
 
 PARAMETER_HINTS = {
     "host": "COMSOL server hostname. For local GUI sync, use 'localhost'.",

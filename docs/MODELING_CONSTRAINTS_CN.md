@@ -69,14 +69,16 @@ COMSOL 的真实 feature id 不是直觉写法：
 实测：0.1 m 立方体（`blk1`，`base=corner`，位置 [0,0,0]）的**底面是 3、顶面是 4**，
 不是直觉的 1 和 2。所以**不要硬编码面编号**，用坐标框选或先探测。
 
-### 材料属性值必须用列表包装
+### 材料属性值：标量与列表均可
 
 ```python
-# 正确
-material.propertyGroup('def').set('thermalconductivity', ['205[W/(m*K)]'])
-# 错误 —— 可能被解析为 0，导致矩阵奇异
-material.propertyGroup('def').set('thermalconductivity', '205[W/(m*K)]')
+material.propertyGroup('def').set('thermalconductivity', '205[W/(m*K)]')    # 标量
+material.propertyGroup('def').set('thermalconductivity', ['205[W/(m*K)]'])  # 列表（各向异性时用）
 ```
+
+2026-09-12 实测：标量与列表两种写法的求解结果完全一致（误差 ~1e-15），
+"标量会被解析为 0 导致矩阵奇异"的旧警告在本机不复现，已撤销。
+各向异性/温度相关属性仍需列表或张量形式。
 
 ### 局部网格加密必须建在网格序列下
 
@@ -113,7 +115,7 @@ material.propertyGroup('def').set('thermalconductivity', '205[W/(m*K)]')
 | `Unknown feature ID X#Temperature` | 用了直觉 feature id | 用别名，或写 `TemperatureBoundary` |
 | 边界条件 `selection=[]` / 求解不收敛 | 框选没选中任何面 | 加大框余量，或改用显式 `boundaries` |
 | 解场极值超出边界给定值 | 非收敛解 / 选择集有问题 | 本项目会在 `solve_error` 里报出来；别直接引用数值 |
-| 矩阵奇异 / 解为 NaN | 材料属性没包装成列表 | 所有属性值用 `[...]` |
+| 矩阵奇异 / 解为 NaN | 材料属性写法错误或单位缺失 | 检查属性表达式与单位 |
 | `Operation cannot be created in this context` | 用了个不受支持的 API 类型 | 换 `model.evaluate()` 路线 |
 | 网格加密不生效 | Size 建在根节点 | 建在网格序列下 |
 | 连接被拒绝 | 端口不对 / 进程锁 | 确认端口，杀残留 python 重试 |
