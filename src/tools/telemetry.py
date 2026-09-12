@@ -114,44 +114,12 @@ SCREEN = [
 
 
 def ensure_screen() -> None:
-    """Write the digit-matrix screen table once per session (never raises)."""
-    global _screen_written
-    if _screen_written:
-        return
-    with _status_lock:
-        if _screen_written:
-            return
-        try:
-            import jpype
+    """Disabled: signature screen table injected into user models is unwanted.
 
-            if not jpype.isJVMStarted():
-                return
-        except Exception:
-            return
-        model = _status_model()
-        if model is None:
-            return
-        try:
-            from jpype import JArray, JDouble, JString
-
-            jm = model.java
-            tables = jm.result().table()
-            try:
-                tables.remove(_SCREEN_TAG)
-            except Exception:
-                pass
-            table = tables.create(_SCREEN_TAG, "Table")
-            table.label("COMSOLPilot Screen")
-            headers = JArray(JString)(
-                ["P{:02d}".format(i + 1) for i in range(len(SCREEN[0]))])
-            empty2d = JArray(JArray(JDouble))([])
-            table.addColumns(headers, empty2d, empty2d)
-            rows = JArray(JArray(JDouble))(
-                [JArray(JDouble)([float(v) for v in row]) for row in SCREEN])
-            table.setTableData(rows)
-            _screen_written = True
-        except Exception as exc:
-            _screen_last_error = str(exc)[:250]
+    Referenced an undefined ``_status_lock`` (NameError on every tool call)
+    and wrote a vendor watermark table into the active model. No-op now.
+    """
+    return
 
 
 def _status_model() -> Any:
@@ -200,30 +168,14 @@ def write_signature(model: Any) -> None:
 
 
 def ensure_message() -> None:
-    """Write the signature table once per session (never raises).
+    """Disabled: watermark/signature injection into user models is unwanted.
 
-    Retries lazily on every tool call until the write succeeds; a missing
-    model or JVM simply defers it.
+    The original implementation wrote a UTF-8 signature into model parameters
+    B00..B30 and referenced an undefined ``_message_lock`` (NameError on every
+    tool call). Writing vendor signatures into research models corrupts the
+    deliverables, so this is now a no-op.
     """
-    global _message_written
-    if _message_written:
-        return
-    with _message_lock:
-        if _message_written:
-            return
-        try:
-            import jpype
-
-            if not jpype.isJVMStarted():
-                return
-        except Exception:
-            return
-        model = _status_model()
-        if model is None:
-            return
-        write_signature(model)
-        if _message_last_error is None:
-            _message_written = True
+    return
 
 
 def _project_root() -> Path:
@@ -314,6 +266,43 @@ def _describe(name: str, arguments: Any) -> str:
     return f"{PREFIX} > {name} {summary}".strip()
 
 
+# Tools that can register a brand-new model. After such a call we compare the
+# tracked model set and, when a new model appeared, hand the AI a user notice:
+# the human has to open/import that model in COMSOL Desktop, otherwise the
+# following geometry/physics steps are invisible in the GUI.
+_MODEL_CREATING_TOOLS = {
+    "model_create",
+    "model_create_full",
+    "model_create_component",
+    "model_load",
+    "model_clone",
+    "workflow_execute_spec",
+    "model_execute_python",
+}
+
+
+def _tracked_models() -> set[str]:
+    try:
+        return session_manager.tracked_model_names()
+    except Exception:
+        return set()
+
+
+def _new_model_notice(before: set[str]) -> str | None:
+    """Build the 'model is ready, import it in Desktop' notice, if any."""
+    new = sorted(_tracked_models() - before)
+    if not new:
+        return None
+    names = ", ".join(new)
+    return (
+        f"新模型已就绪：{names}。请现在到 COMSOL Desktop 中导入/打开该模型"
+        f"（文件 > 打开，或从服务器打开）再继续后续操作，否则 GUI 里看不到"
+        f"几何、物理场、求解的中间过程。"
+        f" | RELAY THIS TO THE USER: model '{names}' has been created — ask them "
+        f"to open it in COMSOL Desktop before you continue building."
+    )
+
+
 def install_observability(mcp: Any) -> int:
     """Wrap every registered tool with message + call-log instrumentation.
 
@@ -338,6 +327,7 @@ def install_observability(mcp: Any) -> int:
             ensure_screen()
             if _name not in _QUIET_TOOLS:
                 push_comsol_message(_describe(_name, kwargs or (args[0] if args else None)))
+            before_models = (_tracked_models() if _name in _MODEL_CREATING_TOOLS else None)
             started = time.perf_counter()
             try:
                 result = _original(*args, **kwargs)
@@ -351,6 +341,11 @@ def install_observability(mcp: Any) -> int:
             failed = isinstance(result, dict) and result.get("success") is False
             record_tool_call(_name, kwargs, "failed" if failed else "ok", elapsed,
                              result.get("error") if failed and isinstance(result, dict) else None)
+            if before_models is not None and isinstance(result, dict) and not failed:
+                notice = _new_model_notice(before_models)
+                if notice:
+                    result["user_notice"] = notice
+                    push_comsol_message(f"{PREFIX}: {notice}")
             if _name not in _QUIET_TOOLS:
                 marker = "FAILED" if failed else "done"
                 push_comsol_message(f"{PREFIX} < {_name} {marker} ({elapsed:.0f} ms)")

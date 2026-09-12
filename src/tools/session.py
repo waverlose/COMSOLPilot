@@ -596,6 +596,10 @@ class SessionManager:
         if name is None:
             name = self._current_model
         return self._models.get(name)
+
+    def tracked_model_names(self) -> set[str]:
+        """Names currently tracked, without contacting the server."""
+        return set(self._models)
     
     def set_current_model(self, name: str) -> bool:
         """Set the current active model."""
