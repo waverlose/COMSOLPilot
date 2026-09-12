@@ -386,3 +386,176 @@ def register_mesh_tools(mcp: FastMCP) -> None:
             }
         except Exception as e:
             return {"success": False, "error": f"Failed to add local size: {str(e)}"}
+
+    @mcp.tool()
+    def mesh_configure_boundary_layers(
+        num_layers: int = 3,
+        stretching_factor: float = 1.2,
+        thickness_adjustment_factor: float = 4.0,
+        boundaries: Optional[Sequence[int]] = None,
+        mesh_name: Optional[str] = None,
+        feature_tag: str = "bl1",
+        run_mesh: bool = False,
+        component_name: Optional[str] = None,
+        model_name: Optional[str] = None,
+    ) -> dict:
+        """
+        Add or update a Boundary Layers feature on the mesh sequence.
+
+        Boundary layers resolve near-wall gradients - essential for flow and
+        convective heat transfer (microchannels, forced convection, film
+        cooling). The layer property node is created under the mesh sequence;
+        call the mesh run / study solve afterwards, or set run_mesh=true.
+
+        Args:
+            num_layers: Number of boundary layers (default 3)
+            stretching_factor: Layer stretching factor (default 1.2)
+            thickness_adjustment_factor: Thickness adjustment factor (default 4)
+            boundaries: Optional boundary numbers for the layers; omit to let
+                COMSOL place them on the default (fluid-adjacent) boundaries
+            mesh_name: Mesh sequence tag (default: first mesh, created if none)
+            feature_tag: Feature tag (default: 'bl1')
+            run_mesh: Rebuild the mesh immediately after configuration
+            component_name: Component tag (default: first component)
+            model_name: Model name (default: current model)
+
+        Returns:
+            Applied boundary-layer settings and any property COMSOL rejected
+        """
+        from jpype import JInt
+
+        model = session_manager.get_model(model_name)
+        if model is None:
+            return {
+                "success": False,
+                "error": f"Model not found: {model_name or 'no current model'}"
+            }
+
+        warnings = []
+        applied: dict = {}
+        try:
+            jm = model.java
+            comp, mesh, created = _resolve_mesh(jm, mesh_name, component_name)
+            try:
+                feature = mesh.feature(feature_tag)
+            except Exception:
+                feature = session_manager.retry_comsol_busy(
+                    lambda: mesh.create(feature_tag, "BndLayer"))
+            try:
+                prop = feature(feature_tag + "p")
+            except Exception:
+                prop = session_manager.retry_comsol_busy(
+                    lambda: feature.create(feature_tag + "p", "BndLayerProp"))
+
+            for name, value in (
+                ("numLayers", num_layers),
+                ("stretchingFactor", stretching_factor),
+                ("thicknessAdjustmentFactor", thickness_adjustment_factor),
+            ):
+                try:
+                    converted = JInt(value) if isinstance(value, int) and not isinstance(value, bool) else value
+                    prop.set(name, converted)
+                    applied[name] = value
+                except Exception as exc:
+                    warnings.append({"property": name, "value": value,
+                                     "error": str(exc)[:120]})
+
+            if boundaries:
+                try:
+                    prop.selection().set([int(b) for b in boundaries])
+                    applied["boundaries"] = [int(b) for b in boundaries]
+                except Exception as exc:
+                    warnings.append({"property": "selection",
+                                     "error": str(exc)[:120]})
+
+            if run_mesh:
+                session_manager.retry_comsol_busy(lambda: mesh.run())
+                applied["mesh_run"] = True
+
+            return {
+                "success": True,
+                "component": comp.tag(),
+                "mesh": mesh.tag(),
+                "feature": feature_tag,
+                "applied": applied,
+                "property_warnings": warnings,
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Failed to configure boundary layers: {str(e)}",
+                "property_warnings": warnings,
+            }
+
+    @mcp.tool()
+    def mesh_quality_report(
+        mesh_name: Optional[str] = None,
+        model_name: Optional[str] = None,
+    ) -> dict:
+        """
+        Report mesh statistics: element/vertex counts and quality metrics.
+
+        Aggregates whatever the kernel exposes for the mesh sequence
+        (mesh.stat() label/value pairs plus element and vertex counts), so the
+        AI can judge whether the mesh is fit for the study before solving.
+
+        Args:
+            mesh_name: Mesh sequence tag (default: first mesh)
+            model_name: Model name (default: current model)
+
+        Returns:
+            Statistics dictionary (label -> value when parseable)
+        """
+        model = session_manager.get_model(model_name)
+        if model is None:
+            return {
+                "success": False,
+                "error": f"Model not found: {model_name or 'no current model'}"
+            }
+
+        stats: dict = {}
+        try:
+            jm = model.java
+            _comp, mesh, _created = _resolve_mesh(jm, mesh_name, None)
+
+            try:
+                raw = mesh.stat()
+                pairs = list(raw)
+                if len(pairs) % 2 == 0:
+                    for i in range(0, len(pairs), 2):
+                        label = str(pairs[i])
+                        value = pairs[i + 1]
+                        try:
+                            stats[label] = float(str(value))
+                        except (TypeError, ValueError):
+                            stats[label] = str(value)
+                else:
+                    stats["raw"] = [str(item) for item in pairs]
+            except Exception as exc:
+                stats["stat_error"] = str(exc)[:160]
+
+            try:
+                if hasattr(mesh, "getVertex"):
+                    stats["number_of_vertices"] = int(mesh.getVertex().size())
+            except Exception:
+                pass
+            try:
+                if hasattr(mesh, "getElement"):
+                    stats["number_of_elements"] = int(mesh.getElement().size())
+            except Exception:
+                pass
+
+            features = []
+            try:
+                features = [str(child.name()) for child in mesh.feature()]
+            except Exception:
+                pass
+
+            return {
+                "success": True,
+                "mesh": mesh.tag(),
+                "stats": stats,
+                "features": features,
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Failed to report mesh quality: {str(e)}"}
