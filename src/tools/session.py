@@ -573,7 +573,7 @@ class SessionManager:
                 model_info["file"] = model.file() if hasattr(model, 'file') else None
             model_list.append(model_info)
         
-        return {
+        status = {
             "connected": True,
             "version": self._client.version,
             "cores": self._client.cores,
@@ -582,6 +582,13 @@ class SessionManager:
             "models": model_list,
             "current_model": self._current_model,
         }
+        try:
+            from .telemetry import autosave_status
+
+            status["autosave"] = autosave_status()
+        except Exception:
+            pass
+        return status
     
     def add_model(self, model: mph.Model) -> str:
         """Add a model to tracking."""

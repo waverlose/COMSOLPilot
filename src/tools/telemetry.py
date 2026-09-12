@@ -25,6 +25,7 @@ from __future__ import annotations
 import functools
 import json
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -266,10 +267,109 @@ def _describe(name: str, arguments: Any) -> str:
     return f"{PREFIX} > {name} {summary}".strip()
 
 
+# --- Model autosave ----------------------------------------------------------
+# The stdio link between the AI host and this connector can drop at any time
+# (client timeout, host restart). Models live in the COMSOL server process, so
+# a dropped *link* alone does not delete them — but a server restart does, and
+# after a reconnect the AI also loses its place. A rolling autosave to
+# workspace/autosave/<model>.mph provides a recovery point after every
+# successful modeling step; recover with model_load(path).
+
+_autosave_dir_cached: Path | None = None
+_autosave_state_lock = threading.Lock()
+_autosave_pending = threading.Event()
+_autosave_thread: threading.Thread | None = None
+_autosave_last: dict | None = None
+_autosave_min_interval = 60.0
+_autosave_last_request = 0.0
+
+
+def _autosave_dir() -> Path:
+    global _autosave_dir_cached
+    if _autosave_dir_cached is None:
+        _autosave_dir_cached = _project_root() / "workspace" / "autosave"
+    return _autosave_dir_cached
+
+
+def _autosave_loop() -> None:
+    """Background saver: waits for a pending flag, saves the current model."""
+    global _autosave_last
+    while True:
+        _autosave_pending.wait()
+        with _autosave_state_lock:
+            _autosave_pending.clear()
+        try:
+            model = session_manager.get_model(None)
+            if model is None:
+                continue
+            name = model.name()
+            safe = re.sub(r"[^\w\-]+", "_", name) or "model"
+            directory = _autosave_dir()
+            directory.mkdir(parents=True, exist_ok=True)
+            path = str(directory / (safe + ".mph"))
+            session_manager.retry_comsol_busy(lambda: model.save(path))
+            with _autosave_state_lock:
+                _autosave_last = {
+                    "model": name,
+                    "path": path,
+                    "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+        except Exception:
+            # Server busy (e.g. solving) or save refused: the next successful
+            # tool call re-requests the autosave, so nothing is lost.
+            continue
+
+
+def _request_autosave(force: bool = False) -> None:
+    """Request a debounced background autosave (never raises)."""
+    global _autosave_thread, _autosave_last_request
+    try:
+        try:
+            from .async_handler.solver import async_solver
+
+            if async_solver.is_running:
+                return  # never save while the solver holds the server
+        except Exception:
+            pass
+        now = time.time()
+        if not force and now - _autosave_last_request < _autosave_min_interval:
+            return
+        _autosave_last_request = now
+        with _autosave_state_lock:
+            _autosave_pending.set()
+        if _autosave_thread is None or not _autosave_thread.is_alive():
+            with _autosave_state_lock:
+                _autosave_thread = threading.Thread(
+                    target=_autosave_loop, daemon=True)
+                _autosave_thread.start()
+    except Exception:
+        pass
+
+
+def autosave_status() -> dict:
+    """Autosave state for comsol_status (never raises)."""
+    with _autosave_state_lock:
+        last = dict(_autosave_last) if _autosave_last else None
+    return {
+        "enabled": True,
+        "directory": str(_autosave_dir()),
+        "last": last,
+        "recover_hint": "model_load(path) restores a checkpoint after a disconnect",
+    }
+
+
+# Tools that can register a brand-new model. After such a call we compare the
+
 # Tools that can register a brand-new model. After such a call we compare the
 # tracked model set and, when a new model appeared, hand the AI a user notice:
 # the human has to open/import that model in COMSOL Desktop, otherwise the
 # following geometry/physics steps are invisible in the GUI.
+_MILESTONE_TOOLS = {
+    "workflow_execute_spec",
+    "study_solve",
+    "model_save",
+}
+
 _MODEL_CREATING_TOOLS = {
     "model_create",
     "model_create_full",
@@ -346,6 +446,8 @@ def install_observability(mcp: Any) -> int:
                 if notice:
                     result["user_notice"] = notice
                     push_comsol_message(f"{PREFIX}: {notice}")
+            if not failed:
+                _request_autosave(force=(_name in _MILESTONE_TOOLS))
             if _name not in _QUIET_TOOLS:
                 marker = "FAILED" if failed else "done"
                 push_comsol_message(f"{PREFIX} < {_name} {marker} ({elapsed:.0f} ms)")
