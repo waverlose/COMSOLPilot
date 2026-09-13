@@ -233,11 +233,9 @@ def _sync_json(target: Target, path: Path, port: int, ensure: bool,
 
     if existing_name is not None:
         spec = section[existing_name]
-        current = _port_of_existing(spec)
-        if current == str(port):
-            return {**result, "action": "ok", "detail": f"COMSOL_PORT already {port}"}
         if not isinstance(spec, dict):
             return {**result, "action": "skipped", "reason": "existing entry is not an object"}
+        current = _port_of_existing(spec)
         new_spec = _entry_for_kind(target.kind, port)
         merged = dict(spec)
         for key, value in new_spec.items():
@@ -251,9 +249,22 @@ def _sync_json(target: Target, path: Path, port: int, ensure: bool,
                 merged["environment"] = env
             else:
                 merged[key] = value
+        # Merge even when the port already matches: entries written by older
+        # versions lack PYTHONPATH / UTF-8 / the Windows variables the COMSOL
+        # client needs to find its login file, which breaks the connector with
+        # "No user name and password could be obtained".
+        env_key = "environment" if "environment" in new_spec else "env"
+        env_before = dict(spec.get(env_key) or {})
+        env_after = dict(merged.get(env_key) or {})
+        if current == str(port) and env_before == env_after:
+            return {**result, "action": "ok", "detail": f"COMSOL_PORT already {port}"}
         section[existing_name] = merged
         result["action"] = "updated"
-        result["detail"] = f"COMSOL_PORT {current or '(unset)'} -> {port}"
+        if current == str(port):
+            added = sorted(set(env_after) - set(env_before))
+            result["detail"] = "env refreshed" + (f" (+{', '.join(added)})" if added else "")
+        else:
+            result["detail"] = f"COMSOL_PORT {current or '(unset)'} -> {port}"
     elif ensure:
         section[ENTRY_NAME] = _entry_for_kind(target.kind, port)
         result["action"] = "created"
