@@ -95,6 +95,13 @@ function Find-PythonExe {
     if ($env:COMSOL_PYTHON -and (Test-Path -LiteralPath $env:COMSOL_PYTHON)) {
         return (Resolve-Path -LiteralPath $env:COMSOL_PYTHON).Path
     }
+    # The project venv is the one interpreter guaranteed to have MPh installed.
+    # Preferring a system/Anaconda python here used to break COMSOL version
+    # discovery in complete silence.
+    $venvPython = Join-Path $root ".venv\Scripts\python.exe"
+    if (Test-Path -LiteralPath $venvPython) {
+        return (Resolve-Path -LiteralPath $venvPython).Path
+    }
     $candidates = @(
         "D:\anaconda\envs\comsolpilot\python.exe",
         "$env:USERPROFILE\anaconda3\envs\comsolpilot\python.exe",
@@ -122,44 +129,103 @@ function Find-ComsolServerExe {
     }
     # Cache from a previous launch: runtime.json records what worked last time,
     # so a warm start skips the (slow) discovery attempts below entirely.
+    # An explicitly requested version never reuses the cache: the cached path
+    # belongs to whichever version ran last, and install folders such as
+    # E:\COMSOL64 do not contain the dotted version string, so the cache cannot
+    # be matched by name - switching versions would silently keep the old one.
     try {
         $runtimePath = Join-Path $root "workspace\runtime.json"
         if (Test-Path -LiteralPath $runtimePath) {
             $cached = (Get-Content -LiteralPath $runtimePath -Raw | ConvertFrom-Json).server_exe
-            if ($cached -and (Test-Path -LiteralPath $cached)) {
+            $useCache = -not $ComsolVersion
+            if ($cached -and $useCache -and (Test-Path -LiteralPath $cached)) {
                 return $cached
             }
         }
     }
     catch {
     }
-    if ($Py -and (Test-Path -LiteralPath $Py)) {
-        $oldVersion = $env:COMSOL_MCP_VERSION
-        $env:COMSOL_MCP_VERSION = $ComsolVersion
+    # Version -> executable mapping comes from MPh's own discovery, exposed by
+    # list_comsol_versions.py as JSON. The previous inline one-liner discarded
+    # stderr and swallowed exceptions, so a python without MPh silently fell
+    # through to the pattern list below and returned whichever install matched
+    # first - asking for 6.4 quietly started 6.2.
+    $mapper = Join-Path $root "scripts\list_comsol_versions.py"
+    if ($Py -and (Test-Path -LiteralPath $mapper)) {
+        # Run the enumerator out-of-process: `& $Py script.py` cannot be used in
+        # a pipeline here, and Start-Process aborts on duplicated proxy variable
+        # spellings, so the environment is normalised first and the JSON is
+        # collected through a temp file.
+        Remove-DuplicateCaseEnvironmentVariables
+        $raw = ""
+        $tmpOut = Join-Path $env:TEMP ("comsol_versions_{0}.json" -f $PID)
+        $tmpErr = "$tmpOut.err"
         try {
-            $code = "import os, mph; v=os.environ.get('COMSOL_MCP_VERSION') or None; print(mph.discovery.backend(v)['server'][0])"
-            $path = (& $Py -c $code 2>$null | Select-Object -First 1).Trim()
-            if ($path -and (Test-Path -LiteralPath $path)) {
-                return (Resolve-Path -LiteralPath $path).Path
-            }
+            Start-Process -FilePath $Py -ArgumentList ('"{0}"' -f $mapper) -NoNewWindow -Wait `
+                -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr
         }
         catch {
+            $raw = ""
         }
-        finally {
-            if ($null -eq $oldVersion) {
-                Remove-Item Env:\COMSOL_MCP_VERSION -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $tmpOut) {
+            try {
+                $raw = (Get-Content -LiteralPath $tmpOut -Raw)
             }
-            else {
-                $env:COMSOL_MCP_VERSION = $oldVersion
+            catch {
+                $raw = ""
+            }
+            Remove-Item -LiteralPath $tmpOut -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath $tmpErr -ErrorAction SilentlyContinue
+        # The helper prints one JSON line; keep the last non-empty line so a
+        # stray warning on stdout cannot break parsing.
+        if ($raw) {
+            $lines = @($raw -split "`r?`n" | Where-Object { $_.Trim() })
+            if ($lines.Count -gt 0) {
+                $raw = $lines[-1]
             }
         }
+        $data = $null
+        if ($raw) {
+            try {
+                $data = $raw | ConvertFrom-Json
+            }
+            catch {
+                $data = $null
+            }
+        }
+        if ($data -and $data.success -and $data.versions) {
+            if ($ComsolVersion) {
+                $hit = $data.versions | Where-Object { $_.name -eq $ComsolVersion } | Select-Object -First 1
+                if ($hit -and $hit.server -and (Test-Path -LiteralPath $hit.server)) {
+                    return (Resolve-Path -LiteralPath $hit.server).Path
+                }
+                $found = ($data.versions | ForEach-Object { $_.name }) -join ", "
+                throw "COMSOL $ComsolVersion was requested but it is not installed (MPh found: $found)."
+            }
+            # No version requested: newest discovered installation.
+            $latest = $data.versions | Select-Object -Last 1
+            if ($latest -and $latest.server -and (Test-Path -LiteralPath $latest.server)) {
+                return (Resolve-Path -LiteralPath $latest.server).Path
+            }
+        }
+        if ($ComsolVersion) {
+            throw "Cannot resolve COMSOL ${ComsolVersion}: MPh discovery failed (run menu [6] Diagnose)."
+        }
+    }
+    if ($ComsolVersion) {
+        throw "Cannot resolve COMSOL ${ComsolVersion}: no python with MPh found. Pass -PythonExe or set COMSOL_PYTHON."
     }
 
     $patterns = @(
         "C:\Program Files\COMSOL\*\Multiphysics\bin\win64\comsolmphserver.exe",
+        "C:\Program Files\COMSOL*\Multiphysics\bin\win64\comsolmphserver.exe",
         "C:\Program Files\COMSOL*\*\Multiphysics\bin\win64\comsolmphserver.exe",
+        "D:\COMSOL*\Multiphysics\bin\win64\comsolmphserver.exe",
         "D:\COMSOL*\*\Multiphysics\bin\win64\comsolmphserver.exe",
+        "E:\COMSOL*\Multiphysics\bin\win64\comsolmphserver.exe",
         "E:\COMSOL*\*\Multiphysics\bin\win64\comsolmphserver.exe",
+        "E:\Comsol*\Multiphysics\bin\win64\comsolmphserver.exe",
         "E:\Comsol*\*\Multiphysics\bin\win64\comsolmphserver.exe"
     )
     foreach ($pattern in $patterns) {
@@ -209,7 +275,14 @@ function Find-ComsolDesktopExe {
         $runtimePath = Join-Path $root "workspace\runtime.json"
         if (Test-Path -LiteralPath $runtimePath) {
             $cached = (Get-Content -LiteralPath $runtimePath -Raw | ConvertFrom-Json).desktop_exe
-            if ($cached -and (Test-Path -LiteralPath $cached)) {
+            # Only reuse the cached Desktop when it sits in the same install as
+            # the server we are about to start - otherwise selecting 6.2 would
+            # still open the 6.4 Desktop.
+            $sameInstall = $true
+            if ($ServerExe -and $cached) {
+                $sameInstall = ((Split-Path -Parent $cached) -eq (Split-Path -Parent $ServerExe))
+            }
+            if ($cached -and $sameInstall -and (Test-Path -LiteralPath $cached)) {
                 return $cached
             }
         }
@@ -224,9 +297,13 @@ function Find-ComsolDesktopExe {
     }
     $patterns = @(
         "C:\Program Files\COMSOL\*\Multiphysics\bin\win64\comsol.exe",
+        "C:\Program Files\COMSOL*\Multiphysics\bin\win64\comsol.exe",
         "C:\Program Files\COMSOL*\*\Multiphysics\bin\win64\comsol.exe",
+        "D:\COMSOL*\Multiphysics\bin\win64\comsol.exe",
         "D:\COMSOL*\*\Multiphysics\bin\win64\comsol.exe",
+        "E:\COMSOL*\Multiphysics\bin\win64\comsol.exe",
         "E:\COMSOL*\*\Multiphysics\bin\win64\comsol.exe",
+        "E:\Comsol*\Multiphysics\bin\win64\comsol.exe",
         "E:\Comsol*\*\Multiphysics\bin\win64\comsol.exe"
     )
     foreach ($pattern in $patterns) {
@@ -247,7 +324,8 @@ function Write-RuntimeState {
         [int]$ProcessId,
         [string]$ServerExe,
         [string]$DesktopExe,
-        [string]$Mode
+        [string]$Mode,
+        [string]$ComsolVersion
     )
     try {
         $stateDir = Join-Path $root "workspace"
@@ -259,6 +337,7 @@ function Write-RuntimeState {
             mode        = $Mode
             server_exe  = $ServerExe
             desktop_exe = $DesktopExe
+            comsol_version = $ComsolVersion
             started_at  = (Get-Date).ToString("s")
         }
         $state | ConvertTo-Json | ForEach-Object {
@@ -297,7 +376,7 @@ function Start-ComsolDesktop {
 function Complete-Startup {
     param([int]$RealPort, [int]$ProcessId, [string]$ServerExe, [string]$Mode)
     $desktopExe = Find-ComsolDesktopExe -ServerExe $ServerExe
-    Write-RuntimeState -RealPort $RealPort -ProcessId $ProcessId -ServerExe $ServerExe -DesktopExe $desktopExe -Mode $Mode
+    Write-RuntimeState -RealPort $RealPort -ProcessId $ProcessId -ServerExe $ServerExe -DesktopExe $desktopExe -Mode $Mode -ComsolVersion $Version
     if ($OpenDesktop) {
         Start-ComsolDesktop -DesktopExe $desktopExe -RealPort $RealPort
     }
@@ -337,7 +416,42 @@ if (-not (Test-PortBindable -PortNumber $Port)) {
     $Port = $fallbackPort
 }
 
+# Same for the authentication mode: the launcher's choice (settings.json) is
+# used when the switch is missing, so the .bat and the menu behave alike.
+if (-not $PSBoundParameters.ContainsKey("LoginMode")) {
+    try {
+        $settingsPath = Join-Path $root "workspace\settings.json"
+        if (Test-Path -LiteralPath $settingsPath) {
+            $configured = [string]((Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json).login_mode)
+            if ($configured -in @("auto", "never", "info", "force")) {
+                $LoginMode = $configured
+            }
+        }
+    }
+    catch {
+    }
+}
+
 $resolvedPython = Find-PythonExe -Explicit $PythonExe
+
+# No -Version on the command line: honour the version picked in the launcher
+# (workspace/settings.json), so double-clicking the .bat behaves exactly like
+# starting from the menu and cannot silently launch the other installation.
+if (-not $Version) {
+    try {
+        $settingsPath = Join-Path $root "workspace\settings.json"
+        if (Test-Path -LiteralPath $settingsPath) {
+            $Version = [string]((Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json).comsol_version)
+        }
+    }
+    catch {
+        $Version = ""
+    }
+    if ($Version) {
+        Write-Host "COMSOL version from settings.json: $Version"
+    }
+}
+
 $resolvedServer = Find-ComsolServerExe -Explicit $ServerExe -Py $resolvedPython -ComsolVersion $Version
 if (-not $resolvedServer) {
     throw "Cannot find comsolmphserver.exe. Pass -ServerExe or set COMSOL_SERVER_EXE."

@@ -10,6 +10,8 @@ import mph
 import os
 import re
 import socket
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -63,16 +65,17 @@ def pinned_version() -> Optional[str]:
     installed next to 6.2). Priority:
 
     1. ``COMSOL_MCP_VERSION`` environment variable;
-    2. the COMSOL path recorded in ``workspace/runtime.json``;
-    3. ``comsol_version`` in ``workspace/settings.json``;
+    2. ``comsol_version`` in ``workspace/settings.json`` (the launcher's choice);
+    3. the COMSOL path recorded in ``workspace/runtime.json`` (the live server);
     4. None - let mph decide (single-installation machines).
     """
     env_version = os.environ.get("COMSOL_MCP_VERSION")
     if env_version:
         return env_version
     root = Path(__file__).resolve().parent.parent.parent
-    for name, keys in (("runtime.json", ("server_exe", "desktop_exe")),
-                       ("settings.json", ("comsol_path", "server_exe", "desktop_exe"))):
+    for name, keys in (("settings.json", ("comsol_version",)),
+                       ("runtime.json", ("comsol_version", "server_exe", "desktop_exe")),
+                       ("settings.json", ("comsol_path", "comsol_server_exe", "comsol_desktop_exe"))):
         try:
             state = json.loads((root / "workspace" / name).read_text(encoding="utf-8"))
         except Exception:
@@ -82,6 +85,101 @@ def pinned_version() -> Optional[str]:
             if match:
                 return match.group(1)
     return None
+
+
+def installed_versions() -> list:
+    """COMSOL versions MPh can see on this machine, oldest first."""
+    try:
+        import mph.discovery as discovery
+        names = [str(backend.get("name") or "") for backend in discovery.find_backends()]
+    except Exception:
+        return []
+    def key(name: str):
+        try:
+            return [int(part) for part in name.split(".")]
+        except Exception:
+            return [0]
+    return sorted([name for name in names if name], key=key)
+
+
+def _version_from_runtime(port: int) -> Optional[str]:
+    """Version of the server this project started, when it matches *port*."""
+    root = Path(__file__).resolve().parent.parent.parent
+    try:
+        state = json.loads((root / "workspace" / "runtime.json").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if str(state.get("port") or "") != str(port):
+        return None
+    recorded = str(state.get("comsol_version") or "").strip()
+    if recorded:
+        return recorded
+    match = re.search(r"(\d+\.\d+)", str(state.get("server_exe") or ""))
+    return match.group(1) if match else None
+
+
+_PROBE = (
+    "import sys\n"
+    "try:\n"
+    "    import mph\n"
+    "    client = mph.Client(port=int(sys.argv[1]), host=sys.argv[2], version=sys.argv[3])\n"
+    "    sys.stdout.write('OK ' + str(client.version))\n"
+    "except Exception as exc:\n"
+    "    sys.stdout.write('FAIL ' + str(exc)[:180])\n"
+    "    sys.exit(1)\n"
+)
+
+
+def _probe_version(port: int, host: str) -> Optional[str]:
+    """Try each installed version in a throwaway process; newest first."""
+    for version in reversed(installed_versions()):
+        try:
+            done = subprocess.run(
+                [sys.executable, "-c", _PROBE, str(port), host, version],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=120)
+        except Exception:
+            continue
+        if done.returncode == 0:
+            return version
+    return None
+
+
+def _remember_version(version: str) -> None:
+    """Persist a probed version so the next connection skips the probe."""
+    if not version:
+        return
+    root = Path(__file__).resolve().parent.parent.parent
+    path = root / "workspace" / "settings.json"
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except Exception:
+        settings = {}
+    if str(settings.get("comsol_version") or "") == version:
+        return
+    settings["comsol_version"] = version
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def resolve_connection_version(port: int, host: str, log=None) -> Optional[str]:
+    """The COMSOL version to use for the *first* connection in this process."""
+    recorded = _version_from_runtime(port)
+    if recorded:
+        return recorded
+    pinned = pinned_version()
+    if pinned:
+        return pinned
+    if log is not None:
+        log("COMSOL version not configured; probing the server ...")
+    probed = _probe_version(port, host)
+    if probed:
+        _remember_version(probed)
+        if log is not None:
+            log("Server speaks COMSOL {} (remembered in settings.json).".format(probed))
+    return probed
 
 
 class SessionManager:
@@ -421,7 +519,28 @@ class SessionManager:
         """Connect and bind inside the JVM worker thread (bind touches the JVM)."""
         def _task():
             _ensure_windows_architecture_fallback()
-            client = mph.Client(port=port, host=host, version=pinned_version())
+            version = resolve_connection_version(port, host)
+            try:
+                client = mph.Client(port=port, host=host, version=version)
+            except Exception as exc:
+                # A version mismatch is the one failure the user cannot see
+                # through: COMSOL only reports "版本检查失败 / version check
+                # failed" and never says which side to change.
+                text = str(exc)
+                if "版本检查失败" in text or "version check" in text.lower():
+                    match = re.search(r"(?:Server|服务器)\s*版本[:：]\s*([\d.]+)", text)
+                    server_version = match.group(1) if match else None
+                    if server_version:
+                        _remember_version(server_version)
+                    raise RuntimeError(
+                        "COMSOL version mismatch: the client was {} but the server speaks {}."
+                        "{}The server version has been recorded in workspace/settings.json -"
+                        " restart the connector to pick it up, or start the server with"
+                        " -Version {} so both sides match.".format(
+                            version or "auto", server_version or "unknown",
+                            " " if server_version else " ",
+                            version or "6.4")) from exc
+                raise
             self.bind_client(client)
             return client
         return _task

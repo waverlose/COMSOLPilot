@@ -144,6 +144,9 @@ def action_start(open_desktop: bool) -> None:
     port = resolved_port()
     cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
            str(SCRIPTS / "start_comsol_server.ps1"), "-Port", port]
+    version = comsol_version()
+    if version:
+        cmd += ["-Version", version]
     if open_desktop:
         cmd.append("-OpenDesktop")
     print()
@@ -212,9 +215,88 @@ def table_label() -> str:
         return ""
 
 
+def comsol_version() -> str:
+    """COMSOL version the server (and therefore the MCP client) uses."""
+    try:
+        cfg = json.loads((ROOT / "workspace" / "settings.json").read_text(encoding="utf-8"))
+        return str(cfg.get("comsol_version") or "").strip()
+    except Exception:
+        return ""
+
+
+def settings_update(**values) -> None:
+    """Merge keys into workspace/settings.json (never clobber other settings)."""
+    path = ROOT / "workspace" / "settings.json"
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except Exception:
+        cfg = {}
+    cfg.update(values)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def available_versions() -> list:
+    """[(name, server, desktop)] for every COMSOL MPh can find; [] on failure."""
+    script = SCRIPTS / "list_comsol_versions.py"
+    if not script.is_file():
+        return []
+    try:
+        done = subprocess.run([str(PY), str(script)], cwd=str(ROOT),
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              timeout=240)
+        text = done.stdout.decode("utf-8", "replace").strip().splitlines()
+        data = json.loads(text[-1]) if text else {}
+    except Exception:
+        return []
+    if not data.get("success"):
+        return []
+    return [(str(v.get("name") or ""), v.get("server") or "", v.get("desktop") or "")
+            for v in data.get("versions", [])]
+
+
+def action_version() -> None:
+    print()
+    current = comsol_version()
+    print("  COMSOL version for the server: " + BOLD
+          + (current or "(auto - newest installed)") + RESET)
+    versions = available_versions()
+    if not versions:
+        print(RED + "  Could not list COMSOL installations." + RESET)
+        print(GREY + "  Run menu [6] Diagnose for details." + RESET)
+        pause()
+        return
+    for index, (name, server, desktop) in enumerate(versions, 1):
+        mark = GREY + "   (current)" + RESET if name == current else ""
+        print("  [{}] {}{}".format(index, BOLD + name + RESET, mark))
+        if not server:
+            print(GREY + "      server executable not found" + RESET)
+    print(GREY + "  The MCP client is pinned to the same version, so the COMSOL"
+                 " Desktop you open must match." + RESET)
+    try:
+        raw = input(YELLOW + "  Select version (Enter = auto/newest): " + RESET).strip()
+    except (EOFError, KeyboardInterrupt):
+        return
+    if not raw:
+        settings_update(comsol_version="")
+        print(GREEN + "  Version set to auto (newest installed)." + RESET)
+    elif raw.isdigit() and 1 <= int(raw) <= len(versions):
+        name, server, desktop = versions[int(raw) - 1]
+        settings_update(comsol_version=name, comsol_server_exe=server,
+                        comsol_desktop_exe=desktop)
+        print(GREEN + "  Version set to: " + name + RESET)
+    else:
+        print(RED + "  Invalid selection." + RESET)
+        pause()
+        return
+    print(GREY + "  Restart the server (menu [1] or [2]) for this to take effect." + RESET)
+    pause()
+
+
 MENU = BOLD + "  [1]" + RESET + "  GUI mode        server + COMSOL Desktop (watch the solve)\n" \
      + BOLD + "  [2]" + RESET + "  Headless mode   server only\n" \
      + BOLD + "  [3]" + RESET + "  Port setup\n" \
+     + BOLD + "  [4]" + RESET + "  COMSOL version  server + Desktop version (current: {version})\n" \
      + BOLD + "  [5]" + RESET + "  Table label     opt-in renaming of tables (current: {label})\n" \
      + BOLD + "  [6]" + RESET + "  Diagnose        check server, credentials and connection\n" \
      + BOLD + "  [0]" + RESET + "  Exit\n"
@@ -262,9 +344,12 @@ def draw_screen(animate: bool = False) -> None:
     else:
         print(CYAN + BANNER + RESET)
     print("  " + BOLD + "Port:" + RESET + " " + resolved_port()
-          + "   " + BOLD + "Table label:" + RESET + " " + table_label())
+          + "   " + BOLD + "COMSOL:" + RESET + " " + (comsol_version() or "auto")
+          + "   " + BOLD + "Table label:" + RESET + " "
+          + (table_label() or "(off)"))
     print()
-    print(MENU.format(label=table_label()))
+    print(MENU.format(label=table_label() or "(off)",
+                      version=comsol_version() or "auto"))
 
 
 def main() -> int:
@@ -283,6 +368,8 @@ def main() -> int:
             action_start(open_desktop=False)
         elif choice == "3":
             action_setport()
+        elif choice == "4":
+            action_version()
         elif choice == "5":
             action_tablelabel()
         elif choice == "6":
