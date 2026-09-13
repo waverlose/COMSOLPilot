@@ -834,3 +834,213 @@ def register_geometry_tools(mcp: FastMCP) -> None:
             }
         except Exception as e:
             return {"success": False, "error": f"Failed to select domains by box: {str(e)}"}
+
+    @mcp.tool()
+    def geometry_info(
+        geometry_name: Optional[str] = None,
+        component_name: Optional[str] = None,
+        model_name: Optional[str] = None,
+    ) -> dict:
+        """
+        Report the geometry bounding box, its centre and entity counts.
+
+        Answers the practical question "where is my model?" - a geometry whose
+        centre sits far from the origin looks lost in a corner of the COMSOL
+        Desktop graphics window. Pair with geometry_center to move it back to
+        the origin.
+
+        Args:
+            geometry_name: Geometry sequence tag (default: first one)
+            component_name: Component tag (default: first component)
+            model_name: Model name (default: current model)
+
+        Returns:
+            Per-axis min/max/size, the centre, entity counts, and which kernel
+            accessor supplied the numbers ("source")
+        """
+        model = session_manager.get_model(model_name)
+        if model is None:
+            return {"success": False, "error": f"Model not found: {model_name or 'no current model'}"}
+
+        try:
+            jm = model.java
+            comp = jm.component(component_name) if component_name else _first_component(jm)
+            if comp is None:
+                return {"success": False, "error": "Model has no component."}
+            geom = _find_geometry(comp, geometry_name)
+            if geom is None:
+                return {"success": False, "error": "Model has no geometry sequence."}
+
+            bbox = None
+            source = None
+            try:
+                raw = [float(v) for v in geom.getBoundingBox()]
+                if len(raw) == 6:
+                    # COMSOL returns (xmin, xmax, ymin, ymax, zmin, zmax)
+                    candidate = {"x": (raw[0], raw[1]), "y": (raw[2], raw[3]), "z": (raw[4], raw[5])}
+                    if all(lo <= hi for lo, hi in candidate.values()):
+                        bbox, source = candidate, "getBoundingBox"
+                    else:
+                        candidate = {"x": (raw[0], raw[3]), "y": (raw[1], raw[4]), "z": (raw[2], raw[5])}
+                        if all(lo <= hi for lo, hi in candidate.values()):
+                            bbox, source = candidate, "getBoundingBox(interleaved)"
+            except Exception:
+                pass
+            if bbox is None:
+                try:
+                    bbox = {
+                        "x": (float(geom.getXMin()), float(geom.getXMax())),
+                        "y": (float(geom.getYMin()), float(geom.getYMax())),
+                        "z": (float(geom.getZMin()), float(geom.getZMax())),
+                    }
+                    source = "getXMin/getXMax"
+                except Exception:
+                    pass
+            if bbox is None:
+                return {
+                    "success": False,
+                    "error": "Bounding box is not available from this kernel build.",
+                    "hint": "Build the geometry first, or pass an explicit offset to geometry_center.",
+                }
+
+            info = {
+                "bounding_box": {axis: {"min": lo, "max": hi, "size": hi - lo}
+                                 for axis, (lo, hi) in bbox.items()},
+                "center": {axis: (lo + hi) / 2.0 for axis, (lo, hi) in bbox.items()},
+                "source": source,
+            }
+            for name, getter in (("domains", "getNDomains"), ("boundaries", "getNBoundaries"),
+                                 ("edges", "getNEdges"), ("vertices", "getNVertices")):
+                try:
+                    info[name] = int(getattr(geom, getter)())
+                except Exception:
+                    pass
+
+            center = info["center"]
+            offset_norm = max(abs(center["x"]), abs(center["y"]), abs(center["z"]))
+            size_ref = max(info["bounding_box"][a]["size"] for a in ("x", "y", "z")) or 1.0
+            info["centered"] = offset_norm <= 1e-9 + 0.01 * size_ref
+            info["offset_from_origin"] = offset_norm
+
+            return {"success": True, "geometry": geom.tag(), "component": comp.tag(), "info": info}
+        except Exception as e:
+            return {"success": False, "error": f"Failed to read geometry info: {str(e)}"}
+
+    @mcp.tool()
+    def geometry_center(
+        target_center: Optional[Sequence[float]] = None,
+        offset: Optional[Sequence[float]] = None,
+        geometry_name: Optional[str] = None,
+        feature_tag: str = "mov1",
+        run_build: bool = True,
+        component_name: Optional[str] = None,
+        model_name: Optional[str] = None,
+    ) -> dict:
+        """
+        Move the whole geometry so its bounding box centre lands where you want.
+
+        Fixes the common "my model sits off in a corner" situation: measures the
+        current bounding box centre and adds a Move feature with the required
+        displacement (default target: the origin).
+
+        Args:
+            target_center: Point the geometry centre should move to
+                (default [0, 0, 0])
+            offset: Explicit displacement [dx, dy, dz]; overrides target_center
+            geometry_name: Geometry sequence tag (default: first one)
+            feature_tag: Tag for the Move feature (default: 'mov1')
+            run_build: Rebuild the geometry right after moving (default True)
+            component_name: Component tag (default: first component)
+            model_name: Model name (default: current model)
+
+        Returns:
+            The displacement applied, the centre before and after, and the
+            bounds of the moved geometry
+        """
+        model = session_manager.get_model(model_name)
+        if model is None:
+            return {"success": False, "error": f"Model not found: {model_name or 'no current model'}"}
+
+        try:
+            from jpype import JArray, JDouble
+
+            jm = model.java
+            comp = jm.component(component_name) if component_name else _first_component(jm)
+            if comp is None:
+                return {"success": False, "error": "Model has no component."}
+            geom = _find_geometry(comp, geometry_name)
+            if geom is None:
+                return {"success": False, "error": "Model has no geometry sequence."}
+
+            if offset is not None:
+                if len(offset) != 3:
+                    return {"success": False, "error": "offset must have 3 numbers [dx, dy, dz]."}
+                displacement = [float(v) for v in offset]
+                centre_before = None
+            else:
+                target = [float(v) for v in (target_center or [0.0, 0.0, 0.0])]
+                if len(target) != 3:
+                    return {"success": False, "error": "target_center must have 3 numbers [x, y, z]."}
+                centre_before = _bbox_center(geom)
+                if centre_before is None:
+                    return {
+                        "success": False,
+                        "error": "Bounding box unavailable; pass an explicit offset instead.",
+                    }
+                displacement = [target[i] - centre_before[i] for i in range(3)]
+
+            existing = {feature.tag(): feature for feature in geom.feature()}
+            if feature_tag in existing:
+                feature = existing[feature_tag]
+                created = False
+            else:
+                feature = session_manager.retry_comsol_busy(
+                    lambda: geom.create(feature_tag, "Move"))
+                created = True
+            feature.set("displ", JArray(JDouble)(displacement))
+            try:
+                feature.label("Centre geometry (COMSOLPilot)")
+            except Exception:
+                pass
+
+            built = False
+            if run_build:
+                session_manager.retry_comsol_busy(lambda: geom.run())
+                built = True
+
+            centre_after = _bbox_center(geom) if built else None
+            return {
+                "success": True,
+                "component": comp.tag(),
+                "geometry": geom.tag(),
+                "feature": feature_tag,
+                "created": created,
+                "displacement": displacement,
+                "center_before": centre_before,
+                "center_after": centre_after,
+                "built": built,
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Failed to centre geometry: {str(e)}"}
+
+
+def _bbox_center(geom):
+    """Bounding box centre as [x, y, z], or None when the kernel cannot tell."""
+    try:
+        raw = [float(v) for v in geom.getBoundingBox()]
+        if len(raw) == 6:
+            candidate = [(raw[0], raw[1]), (raw[2], raw[3]), (raw[4], raw[5])]
+            if not all(lo <= hi for lo, hi in candidate):
+                candidate = [(raw[0], raw[3]), (raw[1], raw[4]), (raw[2], raw[5])]
+            if all(lo <= hi for lo, hi in candidate):
+                return [(lo + hi) / 2.0 for lo, hi in candidate]
+    except Exception:
+        pass
+    try:
+        return [
+            (float(geom.getXMin()) + float(geom.getXMax())) / 2.0,
+            (float(geom.getYMin()) + float(geom.getYMax())) / 2.0,
+            (float(geom.getZMin()) + float(geom.getZMax())) / 2.0,
+        ]
+    except Exception:
+        return None
