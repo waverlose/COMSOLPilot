@@ -64,6 +64,24 @@ def _next_feature_tag(geom, prefix: str) -> str:
     return f"{prefix}{index}"
 
 
+def _first_component(jm):
+    """First component of the model, or None."""
+    for comp in jm.component():
+        return comp
+    return None
+
+
+def _find_geometry(comp, geometry_name=None):
+    """Geometry sequence by tag, or the first one when no tag is given."""
+    try:
+        existing = {geom.tag(): geom for geom in comp.geom()}
+    except Exception:
+        return None
+    if geometry_name:
+        return existing.get(geometry_name)
+    return next(iter(existing.values()), None)
+
+
 def register_geometry_tools(mcp: FastMCP) -> None:
     """Register geometry tools with the MCP server."""
     
@@ -1003,10 +1021,29 @@ def register_geometry_tools(mcp: FastMCP) -> None:
             except Exception:
                 pass
 
+            # A Move feature created through the API does not inherit the
+            # previous feature's output here: it needs an explicit input
+            # selection, otherwise the build fails with "必须提供输入对象".
+            input_note = ""
+            try:
+                feature.selection("input").all()
+                input_note = "selection('input').all()"
+            except Exception as exc:
+                input_note = f"input selection not set: {str(exc)[:80]}"
+
             built = False
             if run_build:
-                session_manager.retry_comsol_busy(lambda: geom.run())
-                built = True
+                try:
+                    session_manager.retry_comsol_busy(lambda: geom.run())
+                    built = True
+                except Exception:
+                    # Leave the geometry as it was: a half-applied Move would
+                    # break the mesh and every later step.
+                    try:
+                        geom.feature().remove(feature_tag)
+                    except Exception:
+                        pass
+                    raise
 
             centre_after = _bbox_center(geom) if built else None
             return {
@@ -1019,6 +1056,7 @@ def register_geometry_tools(mcp: FastMCP) -> None:
                 "center_before": centre_before,
                 "center_after": centre_after,
                 "built": built,
+                "input_selection": input_note,
             }
         except Exception as e:
             return {"success": False, "error": f"Failed to centre geometry: {str(e)}"}

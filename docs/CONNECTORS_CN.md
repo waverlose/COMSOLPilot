@@ -129,6 +129,8 @@ COMSOLPilot 接入后**不向模型写入任何节点**（早期版本的签名�
 13. **[需知晓]** 连接器报 `No user name and password could be obtained`：服务端用 `-login auto` 启动时，**服务端的用户库要靠 Desktop 先登录一次才建立**；在此之前任何 API 客户端（MPh/mph）都认证不了。正确顺序是：双击 bat 起服务端 → 在 Desktop 里 `文件 > COMSOL Multiphysics Server > Connect to Server`（localhost:2036，admin）登录一次 → 再让连接器连接。验证方法：服务端日志出现 `用户名为 'admin' 的 COMSOL Multiphysics 客户端已从 '<主机>' 登录` 即表示可以了（自检脚本 `scripts/check_comsol_login.py` 或启动器菜单 [6] 可直接检查这一整条链）。
 14. **[需知晓]** 服务端不要从脚本/工具调用的进程树里启动：那样的进程会随调用结束被回收，且环境与交互会话不一致（第 10 条的完整解释）。要"无人值守"地拉起，可用计划任务/后台常驻任务，但**认证仍需一次 Desktop 登录**。
 
+15. **[必须知晓] 多版本共存导致认证失败（09-13 全程排查结论）**：机器上同时装了 `E://Comsol Multiphysics 6.2`（本项目启动的服务端）与 `E://COMSOL Multiphysics 6.4` 时，mph 的自动发现会挑**最新版**（6.4），于是客户端库 6.4 去连 6.2 服务端 —— 握手失败，报的却是极具误导性的 `No user name and password could be obtained`。修复已内置：`session.py` 的 `pinned_version()` 按 `COMSOL_MCP_VERSION` → `workspace/runtime.json` 记录的 COMSOL 路径 → `settings.json` 的顺序**钉定版本**（实测 `pinned_version() = 6.2`）。**排查口诀**：认证类报错先确认客户端与服务端版本一致，再看凭据。
+
 **会话阶段（最容易浪费时间）**
 
 11. **[需知晓]** 改完配置、点了信任，**当前对话**还是看不到 `comsol_*` 工具：会话的工具清单在创建那一刻就定死了，改配置/信任/重启应用都不会让旧会话重算。

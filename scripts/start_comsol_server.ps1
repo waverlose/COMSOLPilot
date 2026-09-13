@@ -1,5 +1,12 @@
 param(
     [int]$Port = 2036,
+    # Server authentication mode:
+    #   auto  - clients must log in (a Desktop login is required first)
+    #   never - no authentication; any local/API client may connect
+    #   info  - ask only for missing login information
+    #   force - always ask for login information
+    [ValidateSet("auto", "never", "info", "force")]
+    [string]$LoginMode = "auto",
     [int]$Cores = 0,
     [string]$Version = "",
     [string]$ServerExe = "",
@@ -340,7 +347,10 @@ $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $stdoutLog = Join-Path $logDir "comsol_server_$Port`_$timestamp.out.log"
 $stderrLog = Join-Path $logDir "comsol_server_$Port`_$timestamp.err.log"
 
-$arguments = @("-login", "auto", "-graphics", "-autosave", "off", "-port", "$Port", "-multi", "on")
+$arguments = @("-login", $LoginMode, "-graphics", "-autosave", "off", "-port", "$Port", "-multi", "on")
+if ($LoginMode -eq "never") {
+    Write-Warning "LoginMode=never: this server accepts unauthenticated clients on port $Port."
+}
 if ($Cores -gt 0) {
     $arguments += @("-np", "$Cores")
 }

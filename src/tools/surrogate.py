@@ -143,17 +143,38 @@ def register_surrogate_tools(mcp: FastMCP) -> None:
                 step = study.create(feature_tag, _SURROGATE_FEATURE)
                 created_feature = True
 
+            # Only set what this kernel actually exposes: 6.2 has no
+            # 'automatictraining' (that appeared in 6.4); training is driven by
+            # 'surrogatemodel' + 'computeaction' here.
+            try:
+                supported = {str(name) for name in step.properties()}
+            except Exception:
+                supported = set()
+
             applied = {}
-            step.set("surrogatemodel", surrogate_model)
-            applied["surrogatemodel"] = surrogate_model
-            step.set("nsolvenonadp", JInt(int(sample_points)))
-            applied["nsolvenonadp"] = int(sample_points)
-            step.set("automatictraining", bool(automatic_training))
-            applied["automatictraining"] = bool(automatic_training)
-            step.set("computeaction", compute_action)
-            applied["computeaction"] = compute_action
-            step.set("convinfo", training_log_level)
-            applied["convinfo"] = training_log_level
+
+            def apply(name, value):
+                if supported and name not in supported:
+                    warnings.append({"property": name,
+                                     "skipped": "not supported by this kernel"})
+                    return
+                try:
+                    step.set(name, value)
+                    applied[name] = str(value)
+                except Exception as exc:
+                    warnings.append({"property": name, "error": str(exc)[:120]})
+
+            apply("surrogatemodel", surrogate_model)
+            apply("nsolvenonadp", JInt(int(sample_points)))
+            apply("computeaction", compute_action)
+            # 6.2 rejects the documented token 'normal' for convinfo, so only
+            # send it when the caller deliberately asks for another level.
+            if training_log_level != "normal":
+                apply("convinfo", training_log_level)
+            if not automatic_training:
+                warnings.append({"property": "automatictraining",
+                                 "note": "6.2 trains as part of the step; "
+                                         "re-run with computeaction=append to improve"})
 
             if activation:
                 bad = [a for a in activation if a not in (

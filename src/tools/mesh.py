@@ -449,11 +449,24 @@ def register_mesh_tools(mcp: FastMCP) -> None:
                 prop = session_manager.retry_comsol_busy(
                     lambda: feature.create(feature_tag + "p", "BndLayerProp"))
 
+            # Real 6.2 property names, verified on the live kernel:
+            #   blnlayers = number of layers, blstretch = stretching factor,
+            #   blhminfact = thickness adjustment factor (the COMSOL GUI's
+            #   "厚度调节因子"), blhmin/blhtot/inittype for manual thicknesses.
+            supported = set()
+            try:
+                supported = {str(name) for name in prop.properties()}
+            except Exception:
+                pass
             for name, value in (
-                ("numLayers", num_layers),
-                ("stretchingFactor", stretching_factor),
-                ("thicknessAdjustmentFactor", thickness_adjustment_factor),
+                ("blnlayers", num_layers),
+                ("blstretch", stretching_factor),
+                ("blhminfact", thickness_adjustment_factor),
             ):
+                if supported and name not in supported:
+                    warnings.append({"property": name, "value": value,
+                                     "skipped": "not supported by this kernel"})
+                    continue
                 try:
                     converted = JInt(value) if isinstance(value, int) and not isinstance(value, bool) else value
                     prop.set(name, converted)
@@ -520,19 +533,27 @@ def register_mesh_tools(mcp: FastMCP) -> None:
             jm = model.java
             _comp, mesh, _created = _resolve_mesh(jm, mesh_name, None)
 
+            # mesh.stat() returns a MeshStatisticsClient (not iterable); its
+            # getters were enumerated on the live 6.2 kernel.
             try:
-                raw = mesh.stat()
-                pairs = list(raw)
-                if len(pairs) % 2 == 0:
-                    for i in range(0, len(pairs), 2):
-                        label = str(pairs[i])
-                        value = pairs[i + 1]
-                        try:
-                            stats[label] = float(str(value))
-                        except (TypeError, ValueError):
-                            stats[label] = str(value)
-                else:
-                    stats["raw"] = [str(item) for item in pairs]
+                stat = mesh.stat()
+                getters = {
+                    "number_of_elements": "getNumElem",
+                    "number_of_vertices": "getNumVertex",
+                    "min_quality": "getMinQuality",
+                    "mean_quality": "getMeanQuality",
+                    "max_growth_rate": "getMaxGrowthRate",
+                    "mean_growth_rate": "getMeanGrowthRate",
+                    "min_volume": "getMinVolume",
+                    "max_volume": "getMaxVolume",
+                    "volume": "getVolume",
+                    "quality_measure": "getQualityMeasure",
+                }
+                for label, getter in getters.items():
+                    try:
+                        stats[label] = getattr(stat, getter)()
+                    except Exception:
+                        pass
             except Exception as exc:
                 stats["stat_error"] = str(exc)[:160]
 

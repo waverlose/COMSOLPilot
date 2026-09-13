@@ -388,7 +388,9 @@ def install_observability(mcp: Any) -> int:
             failed = isinstance(result, dict) and result.get("success") is False
             record_tool_call(_name, kwargs, "failed" if failed else "ok", elapsed,
                              result.get("error") if failed and isinstance(result, dict) else None)
-            if before_models is not None and isinstance(result, dict) and not failed:
+            # Announce even when the call failed afterwards: the model exists
+            # and the user still has to open it in Desktop.
+            if before_models is not None and isinstance(result, dict):
                 notice = _new_model_notice(before_models)
                 if notice:
                     result["user_notice"] = notice

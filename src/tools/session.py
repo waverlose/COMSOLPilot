@@ -4,12 +4,15 @@ from typing import Optional
 from mcp.server import Server
 from mcp.server.fastmcp import FastMCP
 from functools import lru_cache
+import json
 import platform
 import mph
 import os
+import re
 import socket
 import threading
 import time
+from pathlib import Path
 
 
 DEFAULT_COMSOL_PORT = 2036
@@ -49,6 +52,36 @@ def _ensure_windows_architecture_fallback() -> None:
             return "win64"
 
         mph.discovery.detect_architecture = win64_architecture
+
+
+def pinned_version() -> Optional[str]:
+    """COMSOL version to pin the client to, if it can be determined.
+
+    A workstation may carry several COMSOL versions; mph's discovery picks the
+    newest, which then mismatches the server this project started (that is how
+    "No user name and password could be obtained" appeared after 6.4 was
+    installed next to 6.2). Priority:
+
+    1. ``COMSOL_MCP_VERSION`` environment variable;
+    2. the COMSOL path recorded in ``workspace/runtime.json``;
+    3. ``comsol_version`` in ``workspace/settings.json``;
+    4. None - let mph decide (single-installation machines).
+    """
+    env_version = os.environ.get("COMSOL_MCP_VERSION")
+    if env_version:
+        return env_version
+    root = Path(__file__).resolve().parent.parent.parent
+    for name, keys in (("runtime.json", ("server_exe", "desktop_exe")),
+                       ("settings.json", ("comsol_path", "server_exe", "desktop_exe"))):
+        try:
+            state = json.loads((root / "workspace" / name).read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for key in keys:
+            match = re.search(r"(\d+\.\d+)", str(state.get(key) or ""))
+            if match:
+                return match.group(1)
+    return None
 
 
 class SessionManager:
@@ -388,7 +421,7 @@ class SessionManager:
         """Connect and bind inside the JVM worker thread (bind touches the JVM)."""
         def _task():
             _ensure_windows_architecture_fallback()
-            client = mph.Client(port=port, host=host)
+            client = mph.Client(port=port, host=host, version=pinned_version())
             self.bind_client(client)
             return client
         return _task
