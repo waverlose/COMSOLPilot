@@ -552,6 +552,27 @@ class JavaWorkflowExecutor:
             )
             physics.label(capability.label)
             self.log.append({"step": "physics", "tag": physics.tag(), "type": capability.interface})
+
+            # Domain selection: an interface on a multi-domain geometry must be
+            # told which domains it owns, otherwise Laminar Flow can end up on
+            # the solid and the fluid variables never get solved.
+            domain_spec = physics_spec.get("domains")
+            selection_spec = physics_spec.get("selection")
+            if selection_spec:
+                session_manager.retry_comsol_busy(
+                    lambda: physics.selection().named(str(selection_spec)))
+                self.log.append({"step": "physics_domains", "tag": physics.tag(),
+                                 "selection": str(selection_spec)})
+            elif domain_spec:
+                session_manager.retry_comsol_busy(
+                    lambda: physics.selection().set([int(d) for d in domain_spec]))
+                self.log.append({"step": "physics_domains", "tag": physics.tag(),
+                                 "domains": [int(d) for d in domain_spec]})
+            elif capability.interface in ("LaminarFlow", "TurbulentFlow"):
+                self.log.append({"step": "physics_domains_warning", "tag": physics.tag(),
+                                 "reason": "no 'domains' given for a flow interface; "
+                                           "COMSOL's default selection may cover solid "
+                                           "domains too"})
             for index, bc_spec in enumerate(_as_list(physics_spec.get("boundary_conditions"))):
                 self._boundary_condition(physics, capability, bc_spec, index)
 

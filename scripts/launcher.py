@@ -207,27 +207,29 @@ def table_label() -> str:
     """The label AI-created tables get (workspace/settings.json table_label)."""
     try:
         cfg = json.loads((ROOT / "workspace" / "settings.json").read_text(encoding="utf-8"))
-        return str(cfg.get("table_label") or "COMSOLPilot")
+        return str(cfg.get("table_label") or "").strip()
     except Exception:
-        return "COMSOLPilot"
+        return ""
 
 
 MENU = BOLD + "  [1]" + RESET + "  GUI mode        server + COMSOL Desktop (watch the solve)\n" \
      + BOLD + "  [2]" + RESET + "  Headless mode   server only\n" \
      + BOLD + "  [3]" + RESET + "  Port setup\n" \
-     + BOLD + "  [5]" + RESET + "  Table label     rename AI-created tables (current: {label})\n" \
+     + BOLD + "  [5]" + RESET + "  Table label     opt-in renaming of tables (current: {label})\n" \
      + BOLD + "  [6]" + RESET + "  Diagnose        check server, credentials and connection\n" \
      + BOLD + "  [0]" + RESET + "  Exit\n"
 
 
 def action_tablelabel() -> None:
     print()
-    print("  Current label for AI-created tables: " + BOLD + table_label() + RESET)
+    current = table_label()
+    print("  Current label for AI-created tables: "
+          + BOLD + (current or "(disabled - tables keep their COMSOL names)") + RESET)
     try:
-        value = input(YELLOW + "  New label (Enter = reset to COMSOLPilot): " + RESET).strip()
+        value = input(YELLOW + "  New label (Enter = disable renaming): " + RESET).strip()
     except (EOFError, KeyboardInterrupt):
         return
-    label = value or "COMSOLPilot"
+    label = value
     settings = ROOT / "workspace" / "settings.json"
     try:
         cfg = json.loads(settings.read_text(encoding="utf-8")) if settings.exists() else {}

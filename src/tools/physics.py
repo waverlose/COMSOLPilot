@@ -126,10 +126,29 @@ def _available_physics(jm) -> list[dict]:
 
 def _find_physics(model, physics_name: str, preferred_tag: Optional[str] = None):
     jm = model.java
+    # Resolve interface type aliases first: "htf" is the type
+    # (HeatTransferInSolidsAndFluids) while the created node is tagged "ht".
+    wanted_tags = set()
+    key = str(physics_name).replace(" ", "").replace("_", "").lower()
+    entry = PHYSICS_TYPE_MAP.get(key)
+    if entry:
+        wanted_tags.add(entry[0])
     for comp in jm.component():
         for physics in comp.physics():
             candidates = {physics.tag(), physics.label()}
+            type_name = ""
+            try:
+                type_name = str(physics.getType())
+            except Exception:
+                try:
+                    type_name = str(physics.type())
+                except Exception:
+                    type_name = ""
+            if type_name:
+                candidates.add(type_name)
             if physics_name in candidates or physics_name in physics.label():
+                return comp, physics, None
+            if physics.tag() in wanted_tags:
                 return comp, physics, None
             if preferred_tag and physics.tag() == preferred_tag:
                 return comp, physics, None
@@ -593,20 +612,124 @@ def register_physics_tools(mcp: FastMCP) -> None:
                 "cht": "NonIsothermalFlow",
             }
             coupling_type = aliases.get(coupling_type.lower(), coupling_type)
-            coupling_node = model.create("multiphysics", coupling_type)
-            
+
+            # Multiphysics couplings live under the component and need the
+            # geometry tag; the old model.create("multiphysics", type) call
+            # raised a JPype overload error, so NonIsothermalFlow could never
+            # be created through this tool.
+            jm = model.java
+            comp = None
+            for candidate in jm.component():
+                comp = candidate
+                break
+            if comp is None:
+                return {"success": False, "error": "Model has no component."}
+            geometry_tag = None
+            try:
+                geometry_tag = next(iter(comp.geom())).tag()
+            except Exception:
+                geometry_tag = "geom1"
+
+            tag = {"NonIsothermalFlow": "nitf"}.get(coupling_type, coupling_type[:4].lower())
+            existing = {}
+            try:
+                existing = {str(item.tag()): item for item in comp.multiphysics()}
+            except Exception:
+                pass
+            if tag in existing:
+                coupling_node = existing[tag]
+                created = False
+            else:
+                coupling_node = session_manager.retry_comsol_busy(
+                    lambda: comp.multiphysics().create(tag, coupling_type, str(geometry_tag)))
+                created = True
+
+            # Point the coupling at the requested physics interfaces when the
+            # coupling exposes selection properties for them.
+            warnings = []
+            for index, interface in enumerate(physics_list or [], start=1):
+                for prop in (f"physics{index}", f"phys{index}"):
+                    try:
+                        coupling_node.set(prop, str(interface))
+                        break
+                    except Exception:
+                        continue
+
             return {
                 "success": True,
                 "coupling": {
-                    "name": coupling_node.name() if hasattr(coupling_node, 'name') else coupling_type,
+                    "name": coupling_node.name() if hasattr(coupling_node, "name") else tag,
+                    "tag": tag,
                     "type": coupling_type,
+                    "geometry": str(geometry_tag),
+                    "created": created,
                     "physics": list(physics_list),
-                }
+                },
+                "property_warnings": warnings,
             }
         except Exception as e:
             return {"success": False, "error": f"Failed to add multiphysics: {str(e)}"}
     
     @mcp.tool()
+    @mcp.tool()
+    def physics_set_domain_selection(
+        physics_name: str,
+        domains: Optional[Sequence[int]] = None,
+        selection_name: Optional[str] = None,
+        model_name: Optional[str] = None
+    ) -> dict:
+        """
+        Set which domains a physics interface applies to.
+
+        This is the missing half of "add a physics interface": Laminar Flow on
+        a solid+fluid geometry must be restricted to the fluid domains, and Heat
+        Transfer in Solids and Fluids needs both. Without an explicit selection
+        an interface can cover every domain or none, which shows up as a solve
+        that "completes" while the fluid variables are undefined/NaN.
+
+        Args:
+            physics_name: Physics interface tag or label (e.g. "spf")
+            domains: Domain numbers to apply the interface to
+            selection_name: Existing named selection to use instead of numbers
+            model_name: Model name (default: current model)
+
+        Returns:
+            The selection now in effect, with its size
+        """
+        model = session_manager.get_model(model_name)
+        if model is None:
+            return {"success": False, "error": f"Model not found: {model_name or 'no current model'}"}
+        if not domains and not selection_name:
+            return {"success": False, "error": "Pass 'domains' or 'selection_name'."}
+
+        try:
+            comp, physics, available = _find_physics(model, physics_name)
+            if physics is None:
+                return {"success": False,
+                        "error": f"Physics not found: {physics_name}",
+                        "available_physics": available}
+            selection = physics.selection()
+            if selection_name:
+                selection.named(str(selection_name))
+                applied = {"selection": selection_name}
+            else:
+                selection.set([int(d) for d in domains])
+                applied = {"domains": [int(d) for d in domains]}
+            try:
+                entities = [int(e) for e in selection.entities()]
+            except Exception:
+                entities = None
+            return {
+                "success": True,
+                "physics": physics.tag(),
+                "applied": applied,
+                "domain_count": len(entities) if entities is not None else None,
+                "domains": entities,
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Failed to set domain selection: {str(e)}"}
+
+
     def physics_list_features(
         physics_name: str,
         model_name: Optional[str] = None

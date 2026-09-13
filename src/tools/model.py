@@ -623,8 +623,13 @@ def register_model_tools(mcp: FastMCP) -> None:
 
         The script runs locally inside the MCP server process. It receives these
         variables:
-        - model: active mph.Model
-        - jm: model.java
+        - model: active MPh model (mph.Model) - .geometries(), .physics(),
+          .materials(), .evaluate(); it has NO .component()/.geom() methods
+        - jm:    the raw COMSOL Java model - .component("comp1"), .geom("geom1"),
+          .physics(), .study() (recommended for API-level work)
+        - java:  alias for jm
+        - comp/geom: first component / first geometry (Java), when present
+        - session_manager: the COMSOLPilot session object
         - session_manager: current session manager
         - mph: MPh module
         - Path: pathlib.Path
@@ -655,6 +660,7 @@ def register_model_tools(mcp: FastMCP) -> None:
         namespace: dict[str, Any] = {
             "model": model,
             "jm": model.java,
+            "java": model.java,
             "session_manager": session_manager,
             "mph": mph,
             "Path": Path,

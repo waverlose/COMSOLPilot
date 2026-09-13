@@ -92,6 +92,104 @@ def register_study_tools(mcp: FastMCP) -> None:
             return {"success": False, "error": f"Failed to ensure study: {str(e)}"}
     
     @mcp.tool()
+    @mcp.tool()
+    def study_validate_physics(
+        study_name: Optional[str] = None,
+        model_name: Optional[str] = None
+    ) -> dict:
+        """
+        Check that the study really solves every physics interface.
+
+        Reports, per physics interface, its type, the number of domains it
+        covers, and whether its characteristic variable can be evaluated from
+        the current solution (T for heat transfer, velocity/pressure for flow).
+        This is the direct answer to "the study completed but spf.u is
+        undefined": usually the interface has no domain selection or the study
+        step does not activate it.
+
+        Args:
+            study_name: Study tag to inspect (default: first study)
+            model_name: Model name (default: current model)
+
+        Returns:
+            Per-physics coverage and variable availability, plus study/step info
+        """
+        model = session_manager.get_model(model_name)
+        if model is None:
+            return {"success": False, "error": f"Model not found: {model_name or 'no current model'}"}
+
+        CHARACTERISTIC = {
+            "HeatTransfer": "T",
+            "HeatTransferInSolidsAndFluids": "T",
+            "LaminarFlow": "spf.U",
+            "TurbulentFlow": "spf.U",
+            "SolidMechanics": "solid.disp",
+            "Electrostatics": "V",
+            "ElectricCurrents": "ec.V",
+            "TransportOfDilutedSpecies": "tds.c",
+            "MagneticFields": "mf.normB",
+        }
+
+        try:
+            jm = model.java
+            interfaces = []
+            for comp in jm.component():
+                for physics in comp.physics():
+                    info = {"component": str(comp.tag()), "tag": str(physics.tag())}
+                    try:
+                        info["type"] = str(physics.getType())
+                    except Exception:
+                        try:
+                            info["type"] = str(physics.type())
+                        except Exception:
+                            info["type"] = "unknown"
+                    try:
+                        info["domain_count"] = len([int(e) for e in physics.selection().entities()])
+                    except Exception:
+                        info["domain_count"] = None
+                    expression = CHARACTERISTIC.get(str(info["type"]))
+                    if expression:
+                        info["check_expression"] = expression
+                        try:
+                            value = model.evaluate(expression)
+                            info["variable_available"] = True
+                            info["value_preview"] = str(value)[:80]
+                        except Exception as exc:
+                            info["variable_available"] = False
+                            info["variable_error"] = str(exc)[:160]
+                    interfaces.append(info)
+
+            steps = []
+            try:
+                for study in jm.study():
+                    if study_name and str(study.tag()) != study_name:
+                        continue
+                    for step in study.feature():
+                        steps.append({"study": str(study.tag()), "step": str(step.tag()),
+                                      "type": str(step.type()) if hasattr(step, "type") else "unknown"})
+            except Exception:
+                pass
+
+            problems = []
+            for info in interfaces:
+                if info.get("domain_count") == 0:
+                    problems.append(f"{info['tag']} covers no domains "
+                                    "(call physics_set_domain_selection)")
+                if info.get("variable_available") is False:
+                    problems.append(f"{info['tag']} variable {info.get('check_expression')} "
+                                    "is not available in the current solution")
+
+            return {
+                "success": True,
+                "physics": interfaces,
+                "studies": steps,
+                "problems": problems,
+                "verdict": "ok" if not problems else "needs attention",
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Failed to validate physics: {str(e)}"}
+
+
     def study_list(model_name: Optional[str] = None) -> dict:
         """
         List all studies in a model.

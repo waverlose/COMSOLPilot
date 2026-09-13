@@ -103,9 +103,10 @@ def register_results_tools(mcp: FastMCP) -> None:
     
     @mcp.tool()
     def results_global_evaluate(
-        expression: str,
+        expression: Optional[str] = None,
         unit: Optional[str] = None,
         dataset: Optional[str] = None,
+        expressions: Optional[Sequence[str]] = None,
         model_name: Optional[str] = None
     ) -> dict:
         """
@@ -132,23 +133,47 @@ def register_results_tools(mcp: FastMCP) -> None:
                 "error": f"Model not found: {model_name or 'no current model'}"
             }
         
-        try:
-            result = model.evaluate(expression, unit=unit, dataset=dataset)
-            
-            import numpy as np
-            if isinstance(result, np.ndarray):
-                value = float(result.flatten()[0])
-            else:
-                value = float(result)
-            
-            return {
-                "success": True,
-                "expression": expression,
-                "unit": unit,
-                "value": value,
-            }
-        except Exception as e:
-            return {"success": False, "error": f"Failed to evaluate global expression: {str(e)}"}
+        wanted = list(expressions) if expressions else ([expression] if expression else [])
+        if not wanted:
+            return {"success": False, "error": "Pass 'expression' or 'expressions'."}
+
+        # MPh creates one numerical node per evaluation. A syntax error used to
+        # leave that node behind ("gev1") and the next solve died on the invalid
+        # expression - a destructive side effect. Track nodes and roll back.
+        def _numerical_tags():
+            try:
+                return {str(tag) for tag in model.java.result().numerical().tags()}
+            except Exception:
+                return set()
+
+        import numpy as np
+
+        results = []
+        for item in wanted:
+            before = _numerical_tags()
+            try:
+                result = model.evaluate(item, unit=unit, dataset=dataset)
+                value = float(np.asarray(result).flatten()[0])
+                results.append({"expression": item, "value": value, "unit": unit})
+            except Exception as exc:
+                leaked = sorted(_numerical_tags() - before)
+                for tag in leaked:
+                    try:
+                        model.java.result().numerical().remove(tag)
+                    except Exception:
+                        pass
+                results.append({"expression": item, "error": str(exc)[:400],
+                                "rolled_back_nodes": leaked})
+
+        failed = [item for item in results if "error" in item]
+        response = {"success": not failed, "unit": unit, "results": results}
+        if len(results) == 1 and not failed:
+            response["expression"] = results[0]["expression"]
+            response["value"] = results[0]["value"]
+        if failed:
+            response["error"] = (f"{len(failed)} expression(s) failed; "
+                                 "no result nodes were left behind.")
+        return response
     
     @mcp.tool()
     def results_inner_values(
@@ -325,16 +350,27 @@ def register_results_tools(mcp: FastMCP) -> None:
                 "error": f"Model not found: {model_name or 'no current model'}"
             }
 
-        final = (label or "").strip() or "COMSOLPilot"
-        if not label:
+        # Opt-in only: without an explicit label (or a configured one) this is
+        # a no-op, so models are never stamped with COMSOLPilot names.
+        final = (label or "").strip()
+        if not final:
             try:
                 settings_path = (
                     pathlib.Path(__file__).resolve().parent.parent.parent
                     / "workspace" / "settings.json")
                 cfg = json.loads(settings_path.read_text(encoding="utf-8"))
-                final = str(cfg.get("table_label") or "COMSOLPilot")
+                final = str(cfg.get("table_label") or "").strip()
             except Exception:
-                pass
+                final = ""
+        if not final:
+            return {
+                "success": True,
+                "label": None,
+                "renamed": [],
+                "count": 0,
+                "note": "No label given, so nothing was renamed. Pass label=... "
+                        "to opt in.",
+            }
 
         try:
             table_list = model.java.result().table()
@@ -399,14 +435,15 @@ def register_results_tools(mcp: FastMCP) -> None:
             jm = model.java
             res = jm.result()
             tags = [str(t) for t in res.tags()]
-            if "pg_comsolpilot" not in tags:
-                res.create("pg_comsolpilot", "PlotGroup3D")
+            group_tag = "pg_annot"
+            if group_tag not in tags:
+                res.create(group_tag, "PlotGroup3D")
                 created_group = True
             else:
                 created_group = False
-            pg = jm.result("pg_comsolpilot")
+            pg = jm.result(group_tag)
             try:
-                pg.label("COMSOLPilot")
+                pg.label("Annotations")
             except Exception:
                 pass
 
@@ -430,8 +467,8 @@ def register_results_tools(mcp: FastMCP) -> None:
 
             return {
                 "success": True,
-                "plot_group": "pg_comsolpilot",
-                "label": "COMSOLPilot",
+                "plot_group": group_tag,
+                "label": "Annotations",
                 "created_group": created_group,
                 "annotation_reused": reused,
                 "text": str(text),

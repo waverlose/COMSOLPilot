@@ -30,11 +30,28 @@ def register_mesh_tools(mcp: FastMCP) -> None:
             }
         
         try:
-            meshes = model.meshes()
+            jm = model.java
+            comp = _first_component(jm)
+            if comp is None:
+                return {"success": False, "error": "Model has no component."}
+            entries = []
+            for mesh in comp.mesh():
+                tag = str(mesh.tag())
+                try:
+                    label = str(mesh.label())
+                except Exception:
+                    label = tag
+                entries.append({"tag": tag, "label": label,
+                                "features": _mesh_feature_names(mesh)})
             return {
                 "success": True,
-                "meshes": meshes,
-                "count": len(meshes),
+                # 'meshes' keeps the old shape (tags); 'entries' also carries the
+                # localised label. The label is NOT the tag: "网格 1" vs "mesh1"
+                # is exactly what broke name resolution downstream.
+                "meshes": [item["tag"] for item in entries],
+                "entries": entries,
+                "count": len(entries),
+                "note": "Pass entries[].tag (e.g. 'mesh1') to the other mesh tools.",
             }
         except Exception as e:
             return {"success": False, "error": f"Failed to list meshes: {str(e)}"}
@@ -88,6 +105,10 @@ def register_mesh_tools(mcp: FastMCP) -> None:
                 mesh = comp.mesh().create(mesh_name)
                 created = True
             
+            # A sequence that only carries a Size node produces no elements:
+            # make sure a real meshing feature is present before running.
+            meshing = _ensure_meshing_feature(mesh, jm, component_name)
+
             if mesh_size is not None:
                 if mesh_size < 1 or mesh_size > 9:
                     return {"success": False, "error": "mesh_size must be between 1 and 9."}
@@ -95,10 +116,10 @@ def register_mesh_tools(mcp: FastMCP) -> None:
                     mesh.autoMeshSize(int(mesh_size))
                 except Exception:
                     pass
-            
+
             if run:
                 mesh.run()
-            
+
             return {
                 "success": True,
                 "mesh": mesh.tag(),
@@ -106,6 +127,7 @@ def register_mesh_tools(mcp: FastMCP) -> None:
                 "created": created,
                 "ran": run,
                 "mesh_size": mesh_size,
+                "meshing_feature": meshing,
             }
         except Exception as e:
             return {"success": False, "error": f"Failed to ensure mesh: {str(e)}"}
@@ -208,7 +230,53 @@ def register_mesh_tools(mcp: FastMCP) -> None:
         "coarse": 6, "coarser": 7, "extracoarse": 8, "extremelycoarse": 9,
     }
 
-    def _resolve_mesh(jm, mesh_name: Optional[str], component_name: Optional[str]):
+    def _first_component(jm):
+        for comp in jm.component():
+            return comp
+        return None
+
+
+    def _mesh_feature_names(mesh) -> list:
+        names = []
+        try:
+            for feature in mesh.feature():
+                try:
+                    names.append(str(feature.tag()))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return names
+
+
+    def _ensure_meshing_feature(mesh, jm, component_name: Optional[str] = None) -> dict:
+        """Make sure the mesh sequence ends with a real meshing feature.
+
+        Configuring only the global 'Size' node returns success but produces no
+        elements; the AI had to add a FreeTet node by hand. Add the
+        geometry-appropriate default when it is missing.
+        """
+        tags = _mesh_feature_names(mesh)
+        if any(tag.startswith(("ftet", "ftri", "fhex", "swe", "map", "free")) for tag in tags):
+            return {"created": False, "features": tags}
+        dim = 3
+        try:
+            comp = jm.component(component_name) if component_name else _first_component(jm)
+            geom = next(iter(comp.geom()))
+            dim = int(geom.getSDim())
+        except Exception:
+            pass
+        kind, tag = ("FreeTet", "ftet1") if dim == 3 else ("FreeTri", "ftri1")
+        try:
+            mesh.create(tag, kind)
+        except Exception as exc:
+            return {"created": False, "error": str(exc)[:120], "features": tags}
+        return {"created": True, "tag": tag, "type": kind,
+                "features": _mesh_feature_names(mesh)}
+
+
+    def _resolve_mesh(jm, mesh_name: Optional[str], component_name: Optional[str],
+                      create_missing: bool = True):
         """Resolve a mesh node by tag, creating it if needed.
 
         Meshes live under components, so resolving through the model would miss
@@ -224,10 +292,16 @@ def register_mesh_tools(mcp: FastMCP) -> None:
         existing = {mesh.tag(): mesh for mesh in comp.mesh()}
         if mesh_name and mesh_name in existing:
             return comp, existing[mesh_name], False
+        if mesh_name and not create_missing:
+            # Never silently create an empty sequence for a typo or a localised
+            # label: that used to "succeed" and then report 0 elements.
+            return comp, None, False
         if not mesh_name and existing:
             return comp, next(iter(existing.values())), False
         tag = mesh_name or "mesh1"
-        return comp, comp.mesh().create(tag), True
+        new_mesh = comp.mesh().create(tag)
+        _ensure_meshing_feature(new_mesh, jm, component_name)
+        return comp, new_mesh, True
 
     @mcp.tool()
     def mesh_configure_global_size(
@@ -531,7 +605,19 @@ def register_mesh_tools(mcp: FastMCP) -> None:
         stats: dict = {}
         try:
             jm = model.java
-            _comp, mesh, _created = _resolve_mesh(jm, mesh_name, None)
+            _comp, mesh, _created = _resolve_mesh(jm, mesh_name, None, create_missing=False)
+            if mesh is None:
+                available = []
+                try:
+                    available = [str(item.tag()) for item in _comp.mesh()]
+                except Exception:
+                    pass
+                return {
+                    "success": False,
+                    "error": f"Mesh not found: {mesh_name}",
+                    "available_meshes": available,
+                    "hint": "Use a tag from mesh_list (e.g. 'mesh1'), not the localised label.",
+                }
 
             # mesh.stat() returns a MeshStatisticsClient (not iterable); its
             # getters were enumerated on the live 6.2 kernel.
@@ -574,11 +660,22 @@ def register_mesh_tools(mcp: FastMCP) -> None:
             except Exception:
                 pass
 
+            warning = None
+            if stats.get("number_of_elements") == 0:
+                warning = ("The mesh reports 0 elements: it was never built, or the "
+                           "geometry changed after the last build. Run mesh_ensure"
+                           "(run=True) or mesh_create before trusting the statistics.")
+            try:
+                label = str(mesh.label())
+            except Exception:
+                label = mesh.tag()
             return {
                 "success": True,
                 "mesh": mesh.tag(),
+                "label": label,
                 "stats": stats,
                 "features": features,
+                "warning": warning,
             }
         except Exception as e:
             return {"success": False, "error": f"Failed to report mesh quality: {str(e)}"}
