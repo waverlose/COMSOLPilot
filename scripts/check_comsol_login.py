@@ -22,6 +22,29 @@ import socket
 import subprocess
 import sys
 
+def _ensure_windows_env() -> None:
+    """mph reads APPDATA/USERPROFILE at import time.
+
+    Git Bash and some tool shells either drop these variables or hand them over
+    with slashes mangled ("C://Users//A/..."), which makes mph raise
+    KeyError: 'APPDATA' before any of our code runs. Repair them here so the
+    self-check works from any shell.
+    """
+    home = pathlib.Path.home()
+    defaults = {
+        "USERPROFILE": home,
+        "APPDATA": home / "AppData" / "Roaming",
+        "LOCALAPPDATA": home / "AppData" / "Local",
+    }
+    for key, value in defaults.items():
+        current = os.environ.get(key)
+        if not current or "//" in current or "/" in current:
+            os.environ[key] = str(value)
+    os.environ.setdefault("USERNAME", os.environ.get("USERNAME") or home.name)
+
+
+_ensure_windows_env()
+
 HOST = os.environ.get("COMSOL_HOST", "localhost")
 PORT = int(os.environ.get("COMSOL_PORT", "2036"))
 
