@@ -216,6 +216,7 @@ MENU = BOLD + "  [1]" + RESET + "  GUI mode        server + COMSOL Desktop (watc
      + BOLD + "  [2]" + RESET + "  Headless mode   server only\n" \
      + BOLD + "  [3]" + RESET + "  Port setup\n" \
      + BOLD + "  [5]" + RESET + "  Table label     rename AI-created tables (current: {label})\n" \
+     + BOLD + "  [6]" + RESET + "  Diagnose        check server, credentials and connection\n" \
      + BOLD + "  [0]" + RESET + "  Exit\n"
 
 
@@ -237,6 +238,18 @@ def action_tablelabel() -> None:
     settings.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
     print(GREEN + f"  Table label set to: {label}" + RESET)
     print(GREY + "  Takes effect the next time the AI creates/renames tables." + RESET)
+    pause()
+
+
+def action_diagnose() -> None:
+    """Run the connection self-check (server, credentials, mph connect)."""
+    print()
+    script = SCRIPTS / "check_comsol_login.py"
+    if not script.is_file():
+        print(RED + "  check_comsol_login.py not found." + RESET)
+        pause()
+        return
+    run([str(PY), str(script)])
     pause()
 
 
@@ -270,6 +283,8 @@ def main() -> int:
             action_setport()
         elif choice == "5":
             action_tablelabel()
+        elif choice == "6":
+            action_diagnose()
         elif choice in ("0", "q", "Q"):
             return 0
         else:
