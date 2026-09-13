@@ -198,6 +198,8 @@ class SessionManager:
             # MCP/anyio worker thread, so the connect sequence always owns a
             # dedicated threading.Thread and reports progress through these.
             cls._instance._connecting = False
+            # 'kernel' or 'clientapi'; probed lazily, reset on session loss.
+            cls._instance._api_kind = None
             cls._instance._connect_error: Optional[str] = None
             cls._instance._connect_done = threading.Event()
             cls._instance._connect_lock = threading.Lock()
@@ -232,6 +234,7 @@ class SessionManager:
         """Drop a client whose server has died so a fresh connect can proceed."""
         try:
             self._client = None
+            self._api_kind = None
             self._models.clear()
             self._current_model = None
             if self._server is not None:
@@ -705,6 +708,43 @@ class SessionManager:
                 self._server = None
             return {"success": True, "message": f"Session cleared (error during clear: {e})"}
     
+    def api_kind(self) -> str:
+        """Which COMSOL Java API the models expose: 'kernel' or 'clientapi'.
+
+        COMSOL 6.4 replaced the kernel model API on the client side with the
+        declarative client API (com.comsol.clientapi.impl). mph 1.4.0 does not
+        adapt to it, and every tool here drives the kernel API, so such a
+        session cannot run them. Probed once, cached until the session resets.
+        """
+        if self._api_kind:
+            return self._api_kind
+        try:
+            # Probe with a throwaway model: java.model(tag) is unreliable under
+            # the 6.4 client API ("unknown model" even for models it lists).
+            probe = self._client.java.createUnique("model")
+            try:
+                # Both 6.2 and 6.4 hand out com.comsol.clientapi.impl.ModelClient
+                # objects, but 6.2's implements the kernel interface
+                # (com.comsol.model.Model) while 6.4's does not - the class name
+                # alone cannot tell them apart.
+                import jpype
+
+                kernel_iface = jpype.JClass("com.comsol.model.Model")
+                is_kernel = bool(kernel_iface.class_.isInstance(probe))
+            except Exception:
+                is_kernel = any(
+                    str(i.getName()) == "com.comsol.model.Model"
+                    for i in probe.getClass().getInterfaces())
+            finally:
+                try:
+                    self._client.java.remove(probe.tag())
+                except Exception:
+                    pass
+            self._api_kind = "kernel" if is_kernel else "clientapi"
+        except Exception:
+            self._api_kind = "unknown"
+        return self._api_kind
+
     def get_status(self) -> dict:
         """Get current session status."""
         if self._client is not None and not self._client_is_alive():
@@ -742,6 +782,19 @@ class SessionManager:
             "models": model_list,
             "current_model": self._current_model,
         }
+        try:
+            api_kind = self.api_kind()
+            status["api_compatibility"] = api_kind
+            if api_kind == "clientapi":
+                status["warning"] = (
+                    "COMSOL {} hands out the new declarative client API "
+                    "(com.comsol.clientapi.impl), which none of the modelling "
+                    "tools can drive - geometry, physics, mesh and solve calls "
+                    "will all fail. Start the server with COMSOL 6.2 instead "
+                    "(launcher menu [4]); a 6.4 adapter does not exist yet."
+                ).format(status.get("version"))
+        except Exception:
+            pass
         try:
             from .telemetry import autosave_status
 

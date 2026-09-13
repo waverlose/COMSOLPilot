@@ -131,6 +131,8 @@ COMSOLPilot 接入后**不向模型写入任何节点**（早期版本的签名�
 
 15. **[必须知晓] 多版本共存导致认证失败（09-13 全程排查结论）**：机器上同时装了 `E://Comsol Multiphysics 6.2`（本项目启动的服务端）与 `E://COMSOL Multiphysics 6.4` 时，mph 的自动发现会挑**最新版**（6.4），于是客户端库 6.4 去连 6.2 服务端 —— 握手失败，报的却是极具误导性的 `No user name and password could be obtained`。修复已内置：`session.py` 的 `pinned_version()` 按 `COMSOL_MCP_VERSION` → `workspace/runtime.json` 记录的 COMSOL 路径 → `settings.json` 的顺序**钉定版本**（实测 `pinned_version() = 6.2`）。**排查口诀**：认证类报错先确认客户端与服务端版本一致，再看凭据。
 
+16. **[必须知晓] COMSOL 6.4 暂不能作为 MCP 服务端（09-13 实测结论）**：6.4 把 client 侧的建模 API 换成了新的声明式 clientapi（`com.comsol.clientapi.impl`）——`ModelUtil.createUnique()` 返回 `ModelClient`，`component().create()` 返回没有 `.geometry()` 工厂的通用节点，连 `java.model(tag)` 都会报"未知模型"。本项目全部 104 个工具建立在内核 API（`com.comsol.model`）上，mph 1.4.0（2026-08-30）也未适配此变化，因此在 6.4 服务端上**所有建模工具都会失败**。已内置防护：`comsol_status` 会报告 `api_compatibility`（kernel/clientapi），clientapi 时附明确警告。**当前正确用法**：服务端保持 6.2（启动器菜单 [4] 可选版本）；6.4 Desktop 可以开，但别让它连 MCP 服务端。未来若要支持 6.4，需要按 clientapi 重写整个工具层或等 mph 官方适配。
+
 **会话阶段（最容易浪费时间）**
 
 11. **[需知晓]** 改完配置、点了信任，**当前对话**还是看不到 `comsol_*` 工具：会话的工具清单在创建那一刻就定死了，改配置/信任/重启应用都不会让旧会话重算。
