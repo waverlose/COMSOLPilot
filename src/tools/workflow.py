@@ -178,7 +178,8 @@ def _capabilities_payload() -> dict[str, Any]:
             "geometry": "Array of features, applied in order: block, cylinder, sphere, rectangle, circle, array, difference, union, fillet, chamfer, move. Coordinates and sizes are SI meters.",
             "union": "Optional boolean or object {tag, inputs}.",
             "materials": "Array of {tag, label, properties, domains}. properties use COMSOL keys.",
-            "physics": "Array of {type, boundary_conditions}. type may be alias or tag.",
+            "physics": "Array of {type, domains, boundary_conditions}. type may be an alias (ht, htf for conjugate heat transfer, spf, tds, mf, es, ec, solid) or a kernel tag.",
+            "multiphysics": "Array of {type, tag}. Couplings: nitf (non-isothermal flow, required for conjugate heat transfer), thermal_stress, fsi, joule_heating.",
             "boundary_conditions": "Array of {tag, type, where, properties}. where is box, selection, or boundaries.",
             "where.box": "Object with xmin/xmax/ymin/ymax/zmin/zmax in meters and optional condition.",
             "mesh": "Object: tag='mesh1', size=1..9, run=true.",
@@ -195,11 +196,42 @@ def _capabilities_payload() -> dict[str, Any]:
             "move": "displacement=[dx,dy,dz] or target_center=[x,y,z]",
             "properties": "any feature accepts properties={name: value} as an escape hatch",
             "box_condition": "inside only matches fully contained entities; use intersects for touching ones",
+            "conjugate_heat_transfer": (
+                "Keep the fluid volumes as separate solids and merge everything with "
+                "union (intbnd=true). Do NOT cut the channels out with difference: a "
+                "difference leaves open pockets that the union then swallows, so the "
+                "mesh ends up with 2 domains and no fluid domain to select. Verified on "
+                "6.2: difference -> 2 domains; union(substrate, channels..., cover) -> 6 "
+                "domains incl. 4 channel domains."),
+            "solid_fluid_selection": (
+                "After such a union, select the fluid domains with "
+                "geometry_select_domains_by_box (the channels are thin slabs, so a box "
+                "with a small pad finds them) and assign water to that selection."),
         },
         "physics": _physics_payload(addable_tags),
         "studies": STUDY_CAPABILITIES,
         "outputs": sorted(OUTPUT_CAPABILITIES),
     }
+
+
+def _resolve_physics(value: Any):
+    """(kernel_tag, client_type, label, capability) for a physics type name.
+
+    Curated interfaces come with a boundary-condition table; anything else that
+    PHYSICS_TYPE_MAP knows (htf, tds, mf, ...) resolves to its kernel type so it
+    can still be created, reusing the curated table when the kernel tag matches
+    (htf is the ht interface in its solids-and-fluids flavour).
+    """
+    key = _norm(str(value))
+    kernel_tag = PHYSICS_ALIAS_TO_TAG.get(key)
+    if kernel_tag:
+        capability = PHYSICS_CAPABILITIES[kernel_tag]
+        return kernel_tag, capability.interface, capability.label, capability
+    entry = PHYSICS_TYPE_MAP.get(key)
+    if entry:
+        kernel_tag, client_type, label = entry[0], entry[1], entry[2]
+        return kernel_tag, client_type, label, PHYSICS_CAPABILITIES.get(kernel_tag)
+    return None
 
 
 def _physics_payload(addable_tags: set) -> dict:
@@ -397,12 +429,21 @@ class SpecValidator:
             if not isinstance(physics, dict):
                 self.errors.append(f"{path} must be an object.")
                 continue
-            physics_tag = self._physics_tag(physics.get("type"))
-            if physics_tag is None:
-                self.errors.append(f"{path}.type must be one of {sorted(PHYSICS_ALIAS_TO_TAG)} aliases.")
+            # Accept everything the executor can build, including the aliases
+            # that only live in PHYSICS_TYPE_MAP (htf = conjugate heat transfer).
+            resolved = _resolve_physics(physics.get("type"))
+            if resolved is None:
+                supported = sorted(set(PHYSICS_ALIAS_TO_TAG) | set(PHYSICS_TYPE_MAP))
+                self.errors.append(f"{path}.type must be one of {supported} aliases.")
                 continue
-            capability = PHYSICS_CAPABILITIES[physics_tag]
+            capability = resolved[3]
+            if capability is None:
+                self.warnings.append(
+                    f"{path}: '{physics.get('type')}' has no catalogued boundary "
+                    "conditions; set them with the physics tools or properties.")
             for bc_index, bc in enumerate(_as_list(physics.get("boundary_conditions"))):
+                if capability is None:
+                    continue
                 self._boundary_condition(bc, capability, f"{path}.boundary_conditions[{bc_index}]")
 
     def _mesh(self) -> None:
@@ -494,7 +535,7 @@ class SpecValidator:
 class JavaWorkflowExecutor:
     # Ordered stage names, used for progress reporting. Keep in sync with run().
     STAGES: tuple[str, ...] = (
-        "model", "geometry", "materials", "physics",
+        "model", "geometry", "materials", "physics", "multiphysics",
         "mesh", "study", "solve", "outputs",
     )
 
@@ -540,6 +581,8 @@ class JavaWorkflowExecutor:
             self._report("materials")
             self._physics()
             self._report("physics")
+            self._multiphysics()
+            self._report("multiphysics")
             self._mesh()
             self._report("mesh")
             study_tag = self._study()
@@ -798,14 +841,20 @@ class JavaWorkflowExecutor:
 
     def _physics(self) -> None:
         for physics_spec in self.spec.get("physics", []):
-            physics_tag = PHYSICS_ALIAS_TO_TAG[_norm(physics_spec["type"])]
-            capability = PHYSICS_CAPABILITIES[physics_tag]
+            resolved = _resolve_physics(physics_spec["type"])
+            if resolved is None:
+                raise RuntimeError(
+                    "Unknown physics interface '%s'. Supported: %s"
+                    % (physics_spec["type"], ", ".join(sorted(PHYSICS_CAPABILITIES))
+                       + " / aliases: " + ", ".join(sorted(
+                           key for key in PHYSICS_TYPE_MAP if key not in PHYSICS_ALIAS_TO_TAG))))
+            kernel_tag, client_type, label, capability = resolved
             existing = {physics.tag(): physics for physics in self.component.physics()}
-            physics = existing.get(capability.tag) or session_manager.retry_comsol_busy(
-                lambda: self.component.physics().create(capability.tag, capability.interface, self.geometry.tag())
+            physics = existing.get(kernel_tag) or session_manager.retry_comsol_busy(
+                lambda: self.component.physics().create(kernel_tag, client_type, self.geometry.tag())
             )
-            physics.label(capability.label)
-            self.log.append({"step": "physics", "tag": physics.tag(), "type": capability.interface})
+            physics.label(label)
+            self.log.append({"step": "physics", "tag": physics.tag(), "type": client_type})
 
             # Domain selection: an interface on a multi-domain geometry must be
             # told which domains it owns, otherwise Laminar Flow can end up on
@@ -822,7 +871,7 @@ class JavaWorkflowExecutor:
                     lambda: physics.selection().set([int(d) for d in domain_spec]))
                 self.log.append({"step": "physics_domains", "tag": physics.tag(),
                                  "domains": [int(d) for d in domain_spec]})
-            elif capability.interface in ("LaminarFlow", "TurbulentFlow"):
+            elif capability is not None and capability.interface in ("LaminarFlow", "TurbulentFlow"):
                 self.log.append({"step": "physics_domains_warning", "tag": physics.tag(),
                                  "reason": "no 'domains' given for a flow interface; "
                                            "COMSOL's default selection may cover solid "
@@ -830,7 +879,47 @@ class JavaWorkflowExecutor:
             for index, bc_spec in enumerate(_as_list(physics_spec.get("boundary_conditions"))):
                 self._boundary_condition(physics, capability, bc_spec, index)
 
+    def _multiphysics(self) -> None:
+        """Create multiphysics couplings (e.g. nitf for conjugate heat transfer).
+
+        The coupling is what actually links the flow field to the heat equation;
+        without it a laminar-flow interface and a heat interface coexist but do
+        not exchange anything.
+        """
+        couplings = self.spec.get("multiphysics") or []
+        if not couplings:
+            return
+        aliases = {
+            "nitf": "NonIsothermalFlow",
+            "nonisothermalflow": "NonIsothermalFlow",
+            "nonisothermal": "NonIsothermalFlow",
+            "conjugateheattransfer": "NonIsothermalFlow",
+            "cht": "NonIsothermalFlow",
+            "thermalstress": "ThermalStress",
+            "ts": "ThermalStress",
+            "fluidstructureinteraction": "FluidStructureInteraction",
+            "fsi": "FluidStructureInteraction",
+            "jouleheating": "JouleHeating",
+            "jh": "JouleHeating",
+            "electromechanicalforces": "ElectromechanicalForces",
+        }
+        existing = {node.tag(): node for node in self.component.multiphysics()}
+        for index, coupling in enumerate(_as_list(couplings)):
+            requested = coupling.get("type") if isinstance(coupling, dict) else coupling
+            client_type = aliases.get(_norm(str(requested)), str(requested))
+            tag = (coupling.get("tag") if isinstance(coupling, dict) else None) or "mp%d" % (index + 1)
+            node = existing.get(tag) or session_manager.retry_comsol_busy(
+                lambda: self.component.multiphysics().create(tag, client_type, self.geometry.tag())
+            )
+            self.log.append({"step": "multiphysics", "tag": node.tag(),
+                             "type": client_type, "requested": str(requested)})
+
     def _boundary_condition(self, physics, capability: PhysicsCapability, bc_spec: dict[str, Any], index: int) -> None:
+        if capability is None or bc_spec["type"] not in capability.boundary_conditions:
+            raise RuntimeError(
+                "Boundary condition '%s' is not catalogued for this interface. "
+                "Add it with the physics tools, or set the value with "
+                "physics_set_property in the feature's properties." % bc_spec["type"])
         bc_capability = capability.boundary_conditions[bc_spec["type"]]
         feature_type = bc_capability["feature"]
         bc_tag = bc_spec.get("tag") or f"{physics.tag()}bc{index + 1}"
@@ -894,31 +983,54 @@ class JavaWorkflowExecutor:
             if delta not in deltas:
                 deltas.append(delta)
 
-        selected: list[int] = []
-        used_delta = 0.0
-        for delta in deltas:
+        def _bounds(delta: float) -> None:
             for key, sign in (("xmin", -1.0), ("xmax", 1.0),
                               ("ymin", -1.0), ("ymax", 1.0),
                               ("zmin", -1.0), ("zmax", 1.0)):
                 selection.set(key, str(float(box[key]) + sign * delta))
+
+        requested_condition = str(box.get("condition", "inside"))
+        selected: list[int] = []
+        used_delta = 0.0
+        used_condition = requested_condition
+        for delta in deltas:
+            _bounds(delta)
             selected = [int(item) for item in selection.entities()]
             used_delta = delta
             if selected:
                 break
 
+        # "inside" only matches faces that lie entirely within the box, so a
+        # small box on a large face (a local heat patch on a 20x10 mm base)
+        # matches nothing. Fall back to the weaker tests and report which one
+        # answered, instead of failing the whole build.
+        if not selected and requested_condition == "inside":
+            for fallback in ("allvertices", "intersects"):
+                selection.set("condition", fallback)
+                for delta in deltas:
+                    _bounds(delta)
+                    selected = [int(item) for item in selection.entities()]
+                    used_delta = delta
+                    if selected:
+                        break
+                if selected:
+                    used_condition = fallback
+                    break
+
         if not selected:
             bounds = {k: box[k] for k in ("xmin", "xmax", "ymin", "ymax", "zmin", "zmax") if k in box}
             raise ValueError(
                 f"Box selection '{tag}' matched no boundaries (box={bounds}). "
-                "No face fell inside this box even after expanding it. Check the "
-                "coordinates, or pick boundaries explicitly with "
-                "{\"where\": {\"boundaries\": [...]}}."
+                "No face fell inside this box even after expanding it and trying "
+                "allvertices/intersects. Check the coordinates (SI metres), or "
+                "pick boundaries explicitly with {\"where\": {\"boundaries\": [...]}}."
             )
 
         self.log.append({
             "step": "selection_box",
             "tag": tag,
             "entitydim": 2,
+            "condition": used_condition,
             "boundaries": selected,
             "box_margin": used_delta,
         })
