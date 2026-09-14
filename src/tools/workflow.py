@@ -17,6 +17,7 @@ from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
+from .physics import PHYSICS_TYPE_MAP
 from .session import session_manager
 
 
@@ -195,19 +196,54 @@ def _capabilities_payload() -> dict[str, Any]:
             "properties": "any feature accepts properties={name: value} as an escape hatch",
             "box_condition": "inside only matches fully contained entities; use intersects for touching ones",
         },
-        "physics": {
-            tag: {
-                "interface": cap.interface,
-                "label": cap.label,
-                "aliases": list(cap.aliases),
-                "addable": tag in addable_tags,
-                "boundary_conditions": cap.boundary_conditions,
-            }
-            for tag, cap in PHYSICS_CAPABILITIES.items()
-        },
+        "physics": _physics_payload(addable_tags),
         "studies": STUDY_CAPABILITIES,
         "outputs": sorted(OUTPUT_CAPABILITIES),
     }
+
+
+def _physics_payload(addable_tags: set) -> dict:
+    """Every physics interface the tools accept, with its type-name variants.
+
+    The curated entries (PHYSICS_CAPABILITIES) carry boundary-condition lists;
+    the rest of PHYSICS_TYPE_MAP is added so no supported interface is invisible
+    - notably 'htf' (conjugate heat transfer), which is the ht interface in its
+    solids-and-fluids flavour, and the standalone tds / mf interfaces.
+    """
+    variants: dict[str, list] = {}
+    for alias, entry in PHYSICS_TYPE_MAP.items():
+        kernel_tag, client_type, label = entry[0], entry[1], entry[2]
+        variants.setdefault(kernel_tag, []).append(
+            {"alias": alias, "type": client_type, "label": label})
+
+    payload: dict[str, Any] = {}
+    for tag, cap in PHYSICS_CAPABILITIES.items():
+        item = {
+            "interface": cap.interface,
+            "label": cap.label,
+            "aliases": list(cap.aliases),
+            "addable": tag in addable_tags,
+            "boundary_conditions": cap.boundary_conditions,
+        }
+        if variants.get(tag):
+            # alias -> kernel type name, e.g. htf -> HeatTransferInSolidsAndFluids
+            item["variants"] = variants[tag]
+        payload[tag] = item
+
+    for kernel_tag, items in variants.items():
+        if kernel_tag in payload:
+            continue
+        payload[kernel_tag] = {
+            "interface": items[0]["type"],
+            "label": items[0]["label"],
+            "aliases": sorted({item["alias"] for item in items}),
+            "addable": kernel_tag in addable_tags,
+            "boundary_conditions": {},
+            "variants": items,
+            "note": ("addable, but without a curated boundary-condition list; use "
+                     "physics[].properties or physics_set_property for settings"),
+        }
+    return payload
 
 
 class SpecValidator:
