@@ -777,7 +777,8 @@ def register_geometry_tools(mcp: FastMCP) -> None:
         selection_name: Optional[str] = None,
         geometry_name: Optional[str] = None,
         component_name: Optional[str] = "comp1",
-        condition: str = "inside",
+        condition: str = "auto",
+        pad: float = 0.0,
         model_name: Optional[str] = None
     ) -> dict:
         """
@@ -785,6 +786,18 @@ def register_geometry_tools(mcp: FastMCP) -> None:
 
         Use this to assign materials or domain physics without guessing domain numbers.
         Coordinates are in meters.
+
+        COMSOL exposes no tolerance for box selections and "inside" only matches
+        entities that lie *entirely* inside the box, so a domain whose face sits
+        exactly on the box boundary is silently missed. Two mitigations:
+
+        * pad: grow the box by this many metres in every direction (a good value
+          is a fraction of the smallest feature, e.g. 1e-6 for millimetre parts);
+        * condition="auto" (default): try inside, then allvertices, then
+          somevertex, and report which one produced the result.
+
+        Pass an explicit condition ("inside", "intersects", "allvertices",
+        "somevertex") to bypass the fallback.
         """
         model = session_manager.get_model(model_name)
         if model is None:
@@ -813,24 +826,47 @@ def register_geometry_tools(mcp: FastMCP) -> None:
             # Entity dimension 3 means domains in 3D.
             selection.geom(geom.tag(), 3)
             selection.set("entitydim", "3")
-            selection.set("xmin", str(xmin))
-            selection.set("xmax", str(xmax))
-            selection.set("ymin", str(ymin))
-            selection.set("ymax", str(ymax))
-            selection.set("zmin", str(zmin))
-            selection.set("zmax", str(zmax))
-            selection.set("condition", condition)
+            # pad grows the box so that entities lying exactly on a face are
+            # not missed by the "inside" test.
+            selection.set("xmin", str(xmin - pad))
+            selection.set("xmax", str(xmax + pad))
+            selection.set("ymin", str(ymin - pad))
+            selection.set("ymax", str(ymax + pad))
+            selection.set("zmin", str(zmin - pad))
+            selection.set("zmax", str(zmax + pad))
 
-            selected_domains = None
-            for getter in (
-                lambda: list(selection.entities(3)),
-                lambda: list(selection.entities()),
-            ):
-                try:
-                    selected_domains = [int(item) for item in getter()]
-                    break
-                except Exception:
-                    pass
+            def _entities():
+                for getter in (
+                    lambda: list(selection.entities(3)),
+                    lambda: list(selection.entities()),
+                ):
+                    try:
+                        return [int(item) for item in getter()]
+                    except Exception:
+                        continue
+                return None
+
+            if condition == "auto":
+                tried = []
+                selected_domains = None
+                used_condition = None
+                for candidate in ("inside", "allvertices", "somevertex"):
+                    selection.set("condition", candidate)
+                    found = _entities()
+                    tried.append({"condition": candidate, "domains": found})
+                    if found:
+                        selected_domains = found
+                        used_condition = candidate
+                        break
+                if selected_domains is None:
+                    selected_domains = []
+                    used_condition = "inside"
+                condition_report = {"used": used_condition, "tried": tried,
+                                    "pad": pad}
+            else:
+                selection.set("condition", condition)
+                selected_domains = _entities()
+                condition_report = {"used": condition, "tried": None, "pad": pad}
 
             return {
                 "success": True,
@@ -846,8 +882,12 @@ def register_geometry_tools(mcp: FastMCP) -> None:
                     "zmin": zmin,
                     "zmax": zmax,
                 },
-                "condition": condition,
+                "condition": condition_report["used"],
+                "condition_report": condition_report,
                 "domain_numbers": selected_domains,
+                "warning": (None if selected_domains else
+                            "No domain matched this box. Check the coordinates (SI metres) "
+                            "or raise pad; box selections have no tolerance of their own."),
                 "next_step": "Use this selection tag as domain_selection for material or physics tools.",
             }
         except Exception as e:

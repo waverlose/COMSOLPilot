@@ -54,9 +54,21 @@ class PhysicsCapability:
 
 
 GEOMETRY_CAPABILITIES: dict[str, dict[str, Any]] = {
+    # --- primitives ---------------------------------------------------------
     "block": {"comsol_type": "Block", "required": ["tag", "position", "size"], "dims": (2, 3)},
     "cylinder": {"comsol_type": "Cylinder", "required": ["tag", "position", "radius", "height"], "dims": (3,)},
     "sphere": {"comsol_type": "Sphere", "required": ["tag", "position", "radius"], "dims": (3,)},
+    "rectangle": {"comsol_type": "Rectangle", "required": ["tag", "position", "size"], "dims": (2,)},
+    "circle": {"comsol_type": "Circle", "required": ["tag", "position", "radius"], "dims": (2,)},
+    # --- operations ---------------------------------------------------------
+    # input/subtract take geometry tags; array instances a feature N times;
+    # fillet/convert are 3D-only. "move" needs displacement or target_center.
+    "array": {"comsol_type": "Array", "required": ["tag", "input"], "dims": (2, 3)},
+    "difference": {"comsol_type": "Difference", "required": ["tag", "input", "subtract"], "dims": (2, 3)},
+    "union": {"comsol_type": "Union", "required": ["tag", "input"], "dims": (2, 3)},
+    "fillet": {"comsol_type": "Fillet3D", "required": ["tag", "radius"], "dims": (3,)},
+    "chamfer": {"comsol_type": "Chamfer3D", "required": ["tag"], "dims": (3,)},
+    "move": {"comsol_type": "Move", "required": ["tag"], "dims": (2, 3)},
 }
 
 PHYSICS_CAPABILITIES: dict[str, PhysicsCapability] = {
@@ -162,7 +174,7 @@ def _capabilities_payload() -> dict[str, Any]:
     return {
         "spec_schema": {
             "model": "Object: name, dimension=2|3, component='comp1', geometry='geom1'",
-            "geometry": "Array of features: block/cylinder/sphere. All coordinates and sizes are SI meters.",
+            "geometry": "Array of features, applied in order: block, cylinder, sphere, rectangle, circle, array, difference, union, fillet, chamfer, move. Coordinates and sizes are SI meters.",
             "union": "Optional boolean or object {tag, inputs}.",
             "materials": "Array of {tag, label, properties, domains}. properties use COMSOL keys.",
             "physics": "Array of {type, boundary_conditions}. type may be alias or tag.",
@@ -173,6 +185,16 @@ def _capabilities_payload() -> dict[str, Any]:
             "outputs": "Array of {name, type, expression, unit, raw=false}.",
         },
         "geometry": GEOMETRY_CAPABILITIES,
+        "geometry_notes": {
+            "order": "features are applied in array order; operations reference earlier tags",
+            "array": "input=[tag], count=N, displacement=[dx,dy,dz]",
+            "difference": "input=[tag], subtract=[tags]",
+            "union": "input=[tags], keep_interior=true keeps solid|fluid boundaries",
+            "fillet": "radius, edges=[numbers] or edge_box={xmin..zmax}; default = all edges",
+            "move": "displacement=[dx,dy,dz] or target_center=[x,y,z]",
+            "properties": "any feature accepts properties={name: value} as an escape hatch",
+            "box_condition": "inside only matches fully contained entities; use intersects for touching ones",
+        },
         "physics": {
             tag: {
                 "interface": cap.interface,
@@ -249,6 +271,9 @@ class SpecValidator:
             if feature_type == "block":
                 self._vector(feature, "position", 3, path)
                 self._vector(feature, "size", 3, path)
+            elif feature_type == "rectangle":
+                self._vector(feature, "position", 2, path)
+                self._vector(feature, "size", 2, path)
             elif feature_type == "cylinder":
                 self._vector(feature, "position", 3, path)
                 self._number(feature, "radius", path)
@@ -256,6 +281,45 @@ class SpecValidator:
             elif feature_type == "sphere":
                 self._vector(feature, "position", 3, path)
                 self._number(feature, "radius", path)
+            elif feature_type == "circle":
+                self._vector(feature, "position", 2, path)
+                self._number(feature, "radius", path)
+            elif feature_type in ("array",):
+                self._tag_list(feature, "input", path, minimum=1)
+                if feature.get("displacement") is not None:
+                    self._vector(feature, "displacement", 3, path)
+            elif feature_type == "difference":
+                self._tag_list(feature, "input", path, minimum=1)
+                self._tag_list(feature, "subtract", path, minimum=1)
+            elif feature_type == "union":
+                self._tag_list(feature, "input", path, minimum=1)
+            elif feature_type == "fillet":
+                self._number(feature, "radius", path)
+                if feature.get("edges") is None and feature.get("edge_box") is None:
+                    self.warnings.append(
+                        f"{path}: no edges given, so every edge of the geometry is filleted. "
+                        "Pass edges or edge_box to restrict it.")
+            elif feature_type == "chamfer":
+                if feature.get("distance") is None:
+                    self.errors.append(f"{path}.distance is required for a chamfer.")
+            elif feature_type == "move":
+                if feature.get("displacement") is None and feature.get("target_center") is None:
+                    self.warnings.append(
+                        f"{path}: no displacement given; the Move feature will do nothing.")
+
+    def _tag_list(self, feature: dict, key: str, path: str, minimum: int = 1) -> None:
+        """Validate a list of geometry tags (input / subtract / edges owners)."""
+        value = feature.get(key)
+        if value is None:
+            self.errors.append(f"{path}.{key} is required.")
+            return
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list) or len(value) < minimum:
+            self.errors.append(f"{path}.{key} must be an array of at least {minimum} geometry tag(s).")
+            return
+        if not all(isinstance(item, str) for item in value):
+            self.errors.append(f"{path}.{key} must contain only geometry tags (strings).")
 
     def _union(self) -> None:
         union = self.spec.get("union")
@@ -486,13 +550,16 @@ class JavaWorkflowExecutor:
         self.log.append({"step": "bootstrap", "component": self.component.tag(), "geometry": self.geometry.tag()})
 
     def _geometry_features(self) -> None:
+        # Imported here so the module keeps importing without a JVM present.
+        from jpype import JArray, JDouble, JInt
+
         for feature in self.spec.get("geometry", []):
             feature_type = feature["type"]
             existing = {node.tag(): node for node in self.geometry.feature()}
             node = existing.get(feature["tag"]) or session_manager.retry_comsol_busy(
                 lambda: self.geometry.feature().create(feature["tag"], GEOMETRY_CAPABILITIES[feature_type]["comsol_type"])
             )
-            if feature_type == "block":
+            if feature_type in ("block", "rectangle"):
                 node.set("pos", [str(v) for v in feature["position"]])
                 node.set("size", [str(v) for v in feature["size"]])
             elif feature_type == "cylinder":
@@ -502,10 +569,157 @@ class JavaWorkflowExecutor:
             elif feature_type == "sphere":
                 node.set("pos", [str(v) for v in feature["position"]])
                 node.set("r", str(feature["radius"]))
+            elif feature_type == "circle":
+                node.set("pos", [str(v) for v in feature["position"]])
+                node.set("r", str(feature["radius"]))
+            elif feature_type == "array":
+                node.selection("input").set([str(t) for t in feature["input"]])
+                node.set("type", str(feature.get("type_of_array") or "linear"))
+                # size must be a JInt: set(int) is ambiguous over JPype and fails.
+                node.set("size", JInt(int(feature.get("count") or feature.get("size") or 2)))
+                if feature.get("displacement"):
+                    node.set("displ", JArray(JDouble)([float(v) for v in feature["displacement"]]))
+            elif feature_type == "difference":
+                node.selection("input").set([str(t) for t in feature["input"]])
+                # The subtract list lives in the selection named "input2" on the
+                # 6.2 kernel ("subtract" does not exist).
+                node.selection("input2").set([str(t) for t in feature["subtract"]])
+            elif feature_type == "union":
+                node.selection("input").set([str(t) for t in feature["input"]])
+                if feature.get("keep_interior"):
+                    # Keeps the internal solid|fluid boundaries - required for
+                    # conjugate heat transfer between two domains.
+                    node.set("intbnd", True)
+            elif feature_type == "fillet":
+                # Edge numbers can only be read once the geometry exists, so
+                # build up to this point before touching the edge selection.
+                session_manager.retry_comsol_busy(lambda: self.geometry.run())
+                edges = feature.get("edges")
+                used_box = None
+                if edges is None:
+                    box = feature.get("edge_box")
+                    if box is None:
+                        # Default: every edge of the geometry.
+                        box = {"xmin": -1.0, "xmax": 1.0, "ymin": -1.0, "ymax": 1.0,
+                               "zmin": -1.0, "zmax": 1.0}
+                    edges, used_box = self._edges_in_box(box)
+                if not edges:
+                    # Leaving an empty Fillet3D in the sequence would fail the
+                    # final build; drop it and report instead.
+                    try:
+                        self.geometry.feature().remove(feature["tag"])
+                    except Exception:
+                        pass
+                    self.log.append({"step": "geometry_fillet_skipped", "tag": feature["tag"],
+                                     "reason": "no edges matched the given box; feature removed",
+                                     "box": used_box})
+                    continue
+                source = feature.get("from") or self._last_geometry_tag(feature["tag"])
+                node.selection("edge").set(str(source), JArray(JInt)([int(e) for e in edges]))
+                node.set("radius", str(feature["radius"]))
+                if used_box:
+                    self.log.append({"step": "geometry_fillet_edges", "tag": feature["tag"],
+                                     "count": len(edges), "box": used_box})
+            elif feature_type == "chamfer":
+                session_manager.retry_comsol_busy(lambda: self.geometry.run())
+                edges = feature.get("edges")
+                if edges is None:
+                    box = feature.get("edge_box") or {"xmin": -1.0, "xmax": 1.0, "ymin": -1.0,
+                                                      "ymax": 1.0, "zmin": -1.0, "zmax": 1.0}
+                    edges, _ = self._edges_in_box(box)
+                source = feature.get("from") or self._last_geometry_tag(feature["tag"])
+                node.selection("edge").set(str(source), JArray(JInt)([int(e) for e in edges]))
+                if feature.get("distance") is not None:
+                    node.set("dist", str(feature["distance"]))
+            elif feature_type == "move":
+                node.selection("input").all()
+                displacement = feature.get("displacement")
+                if displacement is None and feature.get("target_center"):
+                    # Measure the geometry and shift its bounding-box centre to
+                    # the requested point (the same thing geometry_center does).
+                    session_manager.retry_comsol_busy(lambda: self.geometry.run())
+                    try:
+                        # Reuse the geometry stage's parser: getBoundingBox() is
+                        # plain 6 doubles whose layout has to be inferred, and
+                        # indexing them as [min,min,min,max,max,max] silently
+                        # produced a wrong centre (the "Move did nothing" report).
+                        from .geometry import _bbox_center
+
+                        centre = _bbox_center(self.geometry)
+                        if centre is None:
+                            raise RuntimeError("exploded bounding box could not be read")
+                        displacement = [float(feature["target_center"][i]) - centre[i]
+                                        for i in range(3)]
+                        self.log.append({"step": "geometry_move_measured",
+                                         "centre_before": centre, "displacement": displacement})
+                    except Exception as exc:  # noqa: BLE001
+                        self.log.append({"step": "geometry_move_measure_failed",
+                                         "error": str(exc)[:140]})
+                if displacement:
+                    node.set("displ", JArray(JDouble)([float(v) for v in displacement]))
+            # Generic escape hatch: any property COMSOL accepts, set verbatim.
+            for key, value in (feature.get("properties") or {}).items():
+                try:
+                    node.set(str(key), value)
+                except Exception as exc:  # noqa: BLE001 - reported, not fatal
+                    self.log.append({"step": "geometry_property_rejected", "tag": feature["tag"],
+                                     "property": key, "error": str(exc)[:120]})
             self.log.append({"step": "geometry_add", "tag": feature["tag"], "type": feature_type})
         self._union_if_requested()
-        self.geometry.run()
+        try:
+            self.geometry.run()
+        except Exception as exc:  # noqa: BLE001 - translate the common kernel refusals
+            message = str(exc)
+            if "nonmanifold" in message or "非流形" in message:
+                raise RuntimeError(
+                    "Geometry build failed: the kernel refuses this operation on "
+                    "nonmanifold geometry. This typically happens when a fillet or "
+                    "chamfer is applied after a Union of face-touching parts. Fix by "
+                    "either (a) filleting each part before merging it, or (b) letting "
+                    "COMSOL repair the geometry first (geometry_add_feature with "
+                    "feature_type='Repair' or 'ConvertToSolid') and retrying. "
+                    "Original kernel message: " + message[:200]) from exc
+            raise
         self.log.append({"step": "geometry_build", "geometry": self.geometry.tag()})
+
+    def _last_geometry_tag(self, exclude: str) -> str:
+        """Tag of the feature before *exclude* - the owner of the fillet edges."""
+        tags = [node.tag() for node in self.geometry.feature()]
+        before = [t for t in tags if t != exclude]
+        return before[-1] if before else "geom1"
+
+    def _edges_in_box(self, box: dict):
+        """Edge numbers inside a coordinate box, via a temporary Box selection.
+
+        Geometry sequences expose no edge listing on the client side, so the
+        numbers have to come from a selection; it is removed again immediately
+        so the model gains no extra node.
+        """
+        selection_tag = "wf_edge_box"
+        component = self.component
+        try:
+            for existing in list(component.selection()):
+                if existing.tag() == selection_tag:
+                    component.selection().remove(selection_tag)
+                    break
+        except Exception:
+            pass
+        sel = component.selection().create(selection_tag, "Box")
+        sel.geom(self.geometry.tag(), 1)
+        sel.set("entitydim", "1")
+        for key in ("xmin", "xmax", "ymin", "ymax", "zmin", "zmax"):
+            if key in box:
+                sel.set(key, str(box[key]))
+        sel.set("condition", str(box.get("condition") or "inside"))
+        try:
+            edges = [int(e) for e in sel.entities(1)]
+        except Exception:
+            edges = [int(e) for e in sel.entities()]
+        try:
+            component.selection().remove(selection_tag)
+        except Exception:
+            pass
+        return edges, dict(box)
 
     def _union_if_requested(self) -> None:
         union = self.spec.get("union")
@@ -522,7 +736,11 @@ class JavaWorkflowExecutor:
             lambda: self.geometry.feature().create(tag, "Union")
         )
         node.selection("input").set(inputs)
-        self.log.append({"step": "geometry_union", "tag": tag, "inputs": inputs})
+        if isinstance(union, dict) and union.get("keep_interior"):
+            # Keep the interior boundaries between the merged domains.
+            node.set("intbnd", True)
+        self.log.append({"step": "geometry_union", "tag": tag, "inputs": inputs,
+                         "keep_interior": bool(isinstance(union, dict) and union.get("keep_interior"))})
 
     def _materials(self) -> None:
         for material_spec in self.spec.get("materials", []):
