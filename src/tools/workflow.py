@@ -178,7 +178,7 @@ def _capabilities_payload() -> dict[str, Any]:
             "geometry": "Array of features, applied in order: block, cylinder, sphere, rectangle, circle, array, difference, union, fillet, chamfer, move. Coordinates and sizes are SI meters.",
             "union": "Optional boolean or object {tag, inputs}.",
             "materials": "Array of {tag, label, properties, domains}. properties use COMSOL keys.",
-            "physics": "Array of {type, domains, boundary_conditions}. type may be an alias (ht, htf for conjugate heat transfer, spf, tds, mf, es, ec, solid) or a kernel tag.",
+            "physics": "Array of {type, domains, fluid_domains, boundary_conditions}. type may be an alias (ht, htf for conjugate heat transfer, spf, tds, mf, es, ec, solid) or a kernel tag. For htf pass fluid_domains so the interface knows which domains carry the flow.",
             "multiphysics": "Array of {type, tag}. Couplings: nitf (non-isothermal flow, required for conjugate heat transfer), thermal_stress, fsi, joule_heating.",
             "boundary_conditions": "Array of {tag, type, where, properties}. where is box, selection, or boundaries.",
             "where.box": "Object with xmin/xmax/ymin/ymax/zmin/zmax in meters and optional condition.",
@@ -876,6 +876,32 @@ class JavaWorkflowExecutor:
                                  "reason": "no 'domains' given for a flow interface; "
                                            "COMSOL's default selection may cover solid "
                                            "domains too"})
+            # Conjugate heat transfer ships a fluid*and* a solid domain feature.
+            # On a merged geometry COMSOL puts every domain in "solid1" and
+            # leaves "fluid1" empty - measured on 6.2: solid1=[1,2], fluid1=[] -
+            # so the interface never receives the flow field and the temperature
+            # field comes back zero. Flag the fluid domains explicitly.
+            if client_type == "HeatTransferInSolidsAndFluids":
+                fluid_domains = physics_spec.get("fluid_domains")
+                if fluid_domains:
+                    try:
+                        physics.feature("fluid1").selection().set(
+                            [int(d) for d in fluid_domains])
+                        self.log.append({"step": "physics_fluid_domains",
+                                         "tag": physics.tag(),
+                                         "domains": [int(d) for d in fluid_domains],
+                                         "note": "solid1 adjusts automatically"})
+                    except Exception as exc:  # noqa: BLE001
+                        self.log.append({"step": "physics_fluid_domains_failed",
+                                         "tag": physics.tag(),
+                                         "error": str(exc)[:140]})
+                else:
+                    self.log.append({
+                        "step": "physics_fluid_domains_warning", "tag": physics.tag(),
+                        "reason": "conjugate heat transfer without fluid_domains: "
+                                  "COMSOL defaults every domain to solid, so the "
+                                  "flow field is not fed into the heat equation"})
+
             for index, bc_spec in enumerate(_as_list(physics_spec.get("boundary_conditions"))):
                 self._boundary_condition(physics, capability, bc_spec, index)
 

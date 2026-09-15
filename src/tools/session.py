@@ -812,17 +812,40 @@ class SessionManager:
         return name
     
     def get_model(self, name: Optional[str] = None) -> Optional[mph.Model]:
-        """Get a model by name or current model."""
+        """Get a model by name or current model, adopting server-side ones.
+
+        A model can exist on the server without being tracked in this process:
+        it may have been created by another MCP session, by another client, or by
+        the user in the COMSOL Desktop. Those used to fail with "Model not found"
+        even though comsol_status listed them, because only locally created
+        models were tracked. Refresh from the server before giving up.
+        """
         if name is None:
             name = self._current_model
-        return self._models.get(name)
+        if name is None:
+            return None
+        model = self._models.get(name)
+        if model is not None:
+            return model
+        self.sync_models()
+        model = self._models.get(name)
+        if model is not None:
+            return model
+        # Tolerate surrounding whitespace / a tag passed instead of a label.
+        wanted = str(name).strip()
+        for tracked_name, candidate in self._models.items():
+            if str(tracked_name).strip() == wanted:
+                return candidate
+        return None
 
     def tracked_model_names(self) -> set[str]:
         """Names currently tracked, without contacting the server."""
         return set(self._models)
     
     def set_current_model(self, name: str) -> bool:
-        """Set the current active model."""
+        """Set the current active model (adopting server-side ones first)."""
+        if name not in self._models:
+            self.get_model(name)
         if name in self._models:
             self._current_model = name
             return True
