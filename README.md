@@ -5,10 +5,10 @@
 **Drive COMSOL Multiphysics with AI — through MCP.**
 **用 MCP 让 AI 直接驱动 COMSOL 多物理场仿真。**
 
-One MCP server + one-click launcher. 92 tools. From geometry to results —
+One MCP server + one-click launcher. 105 tools. From geometry to results —
 watch every step live in COMSOL Desktop.
 
-一个 MCP 服务端 + 一键启动脚本，92 个工具。
+一个 MCP 服务端 + 一键启动脚本，105 个工具。
 从几何建模到结果后处理，每一步都在 COMSOL Desktop 里实时可见。
 
 `Windows` `COMSOL 6.x` `MCP` `Python 3.10+` `JPype / MPh`
@@ -40,7 +40,7 @@ AI 与你的 Desktop 连接同一个服务端：AI 建的几何、材料、物�
 
 | Feature 特性 | Description 说明 |
 |---|---|
-| 92 tools / 92 个工具 | geometry (blocks, cylinders, boolean ops), materials, physics (es/ec/ht/spf/solid), mesh, studies, results, plots, parametric sweeps 几何、材料、物理场、网格、求解、结果、绘图、参数扫描 |
+| 105 tools / 105 个工具 | geometry (blocks, cylinders, boolean ops), materials, physics (es/ec/ht/spf/solid), mesh, studies, results, plots, parametric sweeps 几何、材料、物理场、网格、求解、结果、绘图、参数扫描 |
 | GUI sync / 桌面同步 | AI works on the same server as your Desktop — watch live AI 与 Desktop 共用服务端，操作实时可见 |
 | One-click launcher / 一键启动 | first-run bootstrap (venv + deps), GUI/headless modes, custom port 首次运行自动配环境，GUI/无头模式，端口自定义 |
 | Multi-client / 多客户端 | register into 9 MCP clients on demand — nothing is written without your explicit command 按需注册进 9 种 MCP 客户端，未经指令绝不写入任何配置 |
@@ -130,7 +130,7 @@ analytic formula to roughly eight decimal places.
 ```
 comsolpilot/
 |-- src/                      MCP server, tools, telemetry 源码
-|   +-- server.py             FastMCP server - 92 tools, 5 prompts 服务端
+|   +-- server.py             FastMCP server - 105 tools, 5 prompts 服务端
 |   +-- mcp_targets.py        multi-client config registry 多客户端配置注册表
 |   +-- cli.py                doctor / onboard / config / demo 命令行工具
 |   +-- tools/                session, geometry, physics, mesh, study, results, telemetry

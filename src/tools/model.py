@@ -504,6 +504,66 @@ def register_model_tools(mcp: FastMCP) -> None:
             }
         except Exception as e:
             return {"success": False, "error": f"Failed to save version: {str(e)}"}
+
+    @mcp.tool()
+    def model_list_versions(model_name: Optional[str] = None) -> dict:
+        """List saved timestamped snapshots for a model, newest first.
+
+        Args:
+            model_name: Model name (default: current model)
+
+        Returns:
+            Snapshot paths and modification times
+        """
+        model = session_manager.get_model(model_name)
+        if model is None:
+            return {"success": False, "error": f"Model not found: {model_name or 'no current model'}"}
+        try:
+            paths = list_model_versions(model.name())
+            return {
+                "success": True,
+                "model": model.name(),
+                "versions": [
+                    {"path": path, "modified": Path(path).stat().st_mtime}
+                    for path in paths
+                ],
+                "count": len(paths),
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Failed to list model versions: {str(e)}"}
+
+    @mcp.tool()
+    def model_restore_version(
+        version_path: str,
+        set_current: bool = True,
+    ) -> dict:
+        """Load a saved snapshot as a separate model and keep current models intact.
+
+        Args:
+            version_path: Path returned by model_list_versions
+            set_current: Make the restored model current (default: True)
+
+        Returns:
+            The newly loaded model name and source snapshot path
+        """
+        if not session_manager.is_connected or session_manager.client is None:
+            return {"success": False, "error": "No active COMSOL session. Start with comsol_start first."}
+        path = Path(version_path).expanduser()
+        if not path.is_file() or path.suffix.lower() != ".mph":
+            return {"success": False, "error": f"Snapshot must be an existing .mph file: {version_path}"}
+        try:
+            model = session_manager.client.load(str(path.resolve()))
+            name = session_manager.add_model(model)
+            if set_current:
+                session_manager.set_current_model(name)
+            return {
+                "success": True,
+                "model": name,
+                "restored_from": str(path.resolve()),
+                "is_current": session_manager.current_model == name,
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Failed to restore model snapshot: {str(e)}"}
     
     @mcp.tool()
     def model_list() -> dict:

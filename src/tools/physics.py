@@ -671,7 +671,6 @@ def register_physics_tools(mcp: FastMCP) -> None:
             return {"success": False, "error": f"Failed to add multiphysics: {str(e)}"}
     
     @mcp.tool()
-    @mcp.tool()
     def physics_set_domain_selection(
         physics_name: str,
         domains: Optional[Sequence[int]] = None,

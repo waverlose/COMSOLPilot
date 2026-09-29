@@ -28,6 +28,7 @@ def register_study_tools(mcp: FastMCP) -> None:
             study_name: Study tag to create or reuse (default: 'std1')
             study_type: Study step type, for example Stationary or TimeDependent
             step_tag: Optional study step tag (default based on study_type)
+            tlist: Time list for TimeDependent studies, such as 'range(0, 1, 10)'
             model_name: Model name (default: current model)
         
         Returns:
@@ -91,7 +92,6 @@ def register_study_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return {"success": False, "error": f"Failed to ensure study: {str(e)}"}
     
-    @mcp.tool()
     @mcp.tool()
     def study_validate_physics(
         study_name: Optional[str] = None,

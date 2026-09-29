@@ -17,6 +17,7 @@ from .tools.workflow import register_workflow_tools
 from .tools.prompts import register_prompt_templates
 from .tools.schema_hints import apply_schema_hints
 from .tools.telemetry import install_observability, register_telemetry_tools
+from .tools.catalog import register_catalog_tools
 from .resources.model_resources import register_model_resources
 
 logging.basicConfig(level=logging.INFO)
@@ -39,6 +40,7 @@ def register_all_tools() -> None:
     register_results_tools(mcp)
     register_workflow_tools(mcp)
     register_telemetry_tools(mcp)
+    register_catalog_tools(mcp)
     register_prompt_templates(mcp)
     # FastMCP does not copy Args docstrings into property schemas.
     apply_schema_hints(mcp)

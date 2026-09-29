@@ -121,6 +121,7 @@ def register_results_tools(mcp: FastMCP) -> None:
             expression: Global expression to evaluate
             unit: Desired unit for result
             dataset: Dataset name
+            expressions: Additional global expressions to evaluate together
             model_name: Model name (default: current model)
         
         Returns:

@@ -1,6 +1,6 @@
 [project]
 name = "comsolpilot"
-version = "0.1.0"
+version = "0.2.1"
 description = "COMSOLPilot: MCP server for COMSOL Multiphysics simulation automation"
 readme = "README.md"
 requires-python = ">=3.10"

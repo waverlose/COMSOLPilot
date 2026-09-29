@@ -798,6 +798,20 @@ def register_geometry_tools(mcp: FastMCP) -> None:
 
         Pass an explicit condition ("inside", "intersects", "allvertices",
         "somevertex") to bypass the fallback.
+
+        Args:
+            xmin: Minimum x coordinate in metres
+            xmax: Maximum x coordinate in metres
+            ymin: Minimum y coordinate in metres
+            ymax: Maximum y coordinate in metres
+            zmin: Minimum z coordinate in metres
+            zmax: Maximum z coordinate in metres
+            selection_name: Selection tag to create or reuse
+            geometry_name: Geometry sequence tag (default: first geometry)
+            component_name: Component tag (default: 'comp1')
+            condition: Box matching rule or 'auto'
+            pad: Amount to expand the box in every direction, in metres
+            model_name: Model name (default: current model)
         """
         model = session_manager.get_model(model_name)
         if model is None:
