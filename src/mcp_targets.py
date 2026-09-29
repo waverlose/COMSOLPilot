@@ -27,6 +27,7 @@ import os
 import re
 import shutil
 import socket
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -278,14 +279,34 @@ def _sync_json(target: Target, path: Path, port: int, ensure: bool,
     return {**result, **_write_json(path, config)}
 
 
-def _write_json(path: Path, config: dict) -> dict[str, Any]:
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    temporary_path = Path(temporary)
     try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    except Exception:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _write_json(path: Path, config: dict[str, Any]) -> dict[str, Any]:
+    try:
+        text = json.dumps(config, ensure_ascii=False, indent=2) + "\n"
+        parsed = json.loads(text)
+        section = parsed.get("mcpServers") or parsed.get("mcp")
+        if not isinstance(section, dict) or not isinstance(section.get(ENTRY_NAME), dict):
+            return {"written": False, "action": "failed", "reason": "generated config has no comsolpilot entry"}
         if path.is_file():
-            backup = path.with_suffix(path.suffix + ".bak")
-            shutil.copy2(path, backup)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n",
-                        encoding="utf-8")
+            shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
+        _atomic_write_text(path, text)
         return {"written": True}
     except Exception as exc:
         return {"written": False, "action": "failed", "reason": str(exc)}
@@ -353,10 +374,11 @@ def _sync_codex(target: Target, path: Path, port: int, ensure: bool,
     if dry_run:
         return {**result, "action": action, "detail": detail, "dry_run": True}
     try:
+        if not _SECTION_HEADER.search(new_text):
+            return {**result, "action": "failed", "reason": "generated TOML has no comsolpilot section"}
         if path.is_file():
             shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(new_text, encoding="utf-8")
+        _atomic_write_text(path, new_text)
         return {**result, "action": action, "detail": detail, "written": True}
     except Exception as exc:
         return {**result, "action": "failed", "reason": str(exc)}
