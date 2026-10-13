@@ -19,12 +19,46 @@ workflow_capabilities  # 确认可用的物理场与边界条件别名
 ## 2. 推荐：结构化工作流
 
 ```
-workflow_capabilities
+workflow_recipes            # 先看有没有可直接抄的、已验证的模板
+workflow_capabilities       # 需要自己写时才看 schema
 workflow_validate_spec
 workflow_execute_spec
 ```
 
+**优先从 `workflow_recipes` 起步**：里面每一份 spec 都真在 COMSOL 上跑过，`check`
+字段记着实测结果（例如平行板电容 3.984385 pF vs 解析解 3.98438 pF），照着改数字比从
+schema 从头写快得多、也少踩坑。
+
 低层工具只在需要精细控制或排错时使用。
+
+---
+
+## 2.1 选面：优先"符号化"，不要手算坐标 ⭐
+
+边界条件的 `where` 里**优先用符号化选面**——不需要坐标，因而不会算错：
+
+```jsonc
+{"where": {"face": "zmin"}}                            // z 最小那个面（"底面"）
+{"where": {"face": "zmax"}}                            // z 最大（"顶面"）
+{"where": {"faces": ["xmin", "xmax", "ymin", "ymax"]}} // 四个侧面（自动取并集）
+{"where": {"normal": "+z"}}                            // 外法向朝 +z 的面（= zmax）
+{"where": {"outer": true}}                             // 包围盒上的所有面（凸体即整个外表面）
+```
+
+方向取 `xmin/xmax/ymin/ymax/zmin/zmax`，法向写法 `+x/-x/+y/-y/+z/-z`。
+实测：`{"face":"zmin"}` + `{"face":"zmax"}` 与手写坐标框的结果完全一致
+（Tmax=373.15 K、Tmin=293.15 K）。
+
+只有"载荷只覆盖某个面的一部分"时才退回坐标框：
+
+```jsonc
+{"where": {"box": {"xmin": 0, "xmax": 0.005, "ymin": 0, "ymax": 0.01,
+                   "zmin": 0.0999, "zmax": 0.1001}}}
+```
+
+> **一个面只能给一个边界条件**：同一物理场上，后建的边界条件会把该面从先建的那里
+> "抢走"，先建的选择变空，执行时报
+> `Boundary condition 'xxx' selects no entities`。用符号化选面能确保两个条件选的是不同的面。
 
 ---
 

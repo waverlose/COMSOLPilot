@@ -11,21 +11,31 @@
 
 1. 检测不到 `.venv` 时：自动寻找 Python → 创建虚拟环境 → 安装依赖（一次性 3~5 分钟）；
 2. 自动发现 COMSOL 安装路径（显式参数 → 环境变量 → mph 库 → C/D/E 盘扫描，成功后缓存）；
-3. 无参数启动时自动切换到 Windows Terminal（老式控制台的字体渲染不出点阵界面）。
-
-菜单：
+无参数启动时由 `scripts/menu.py` 画出菜单（编号加粗、说明分列、信息行带当前端口/版本/动画）：
 
 ```
-[1] GUI 模式        服务端 + COMSOL Desktop（同步观察求解过程）
-[2] 无头模式        只起服务端
-[3] 端口设置        当前端口显示在菜单上，改完自动同步到所有已注册客户端
-[0] 退出
+    COMSOLPilot
+    端口 2036    配置: config.toml
+    ------------------------------------------------------------
+
+  端口: 2036    COMSOL: auto    动画: plain
+
+  [1]  headless 模式             后台运行，不打开窗口
+  [2]  gui 模式                  服务端 + COMSOL Desktop
+  [3]  停止 comsol 服务器
+  [4]  重启 comsol 服务器
+  [5]  设置端口
+  [6]  设置 COMSOL 版本
+
+  [0]  退出
 ```
+
+端口和版本既可以在 **`config.toml`** 里改，也可以直接用菜单 5、6（它们写回 config.toml）。
 
 命令行直达（无菜单、不暂停）：
 
 ```
-start_comsol_server.bat gui | headless | status | stop | setport 2040
+start_comsol_server.bat headless | gui | restart | status | stop
 ```
 
 环境变量覆盖：`COMSOL_PORT`、`COMSOL_SERVER_EXE`、`COMSOL_DESKTOP_EXE`。
@@ -71,7 +81,7 @@ python scripts/sync_mcp_port.py --ensure --only workbuddy
 | 文件 | 作用 |
 |---|---|
 | `workspace/runtime.json` | 最近一次启动的真实端口（自动生成） |
-| `workspace/settings.json` | 菜单里设置的偏好端口 |
+| `config.toml` | 端口 / 版本 / 模式 / 登录 等全部设置 |
 
 - 端口优先级：环境变量 `COMSOL_PORT` > `settings.json` > 默认 2036；
 - 服务端启动后，脚本把**已注册客户端**的 `COMSOL_PORT` 同步为当前端口（只改已有条目，从不新建）；
@@ -97,7 +107,7 @@ COMSOLPilot 接入后**不向模型写入任何节点**（早期版本的签名�
 |---|---|
 | 客户端连不上 / 报 Not connected | 服务端必须**先于**连接器启动。先跑 bat，再到客户端重新信任/重启连接器。修复版连接器支持自愈，顺序错了也能直接重连 |
 | 双击 bat 闪退或字符乱 | bat 会自动切到 Windows Terminal；确认系统里装有 Windows Terminal（Store 版即可） |
-| 换了端口但客户端没跟上 | 确认跑过 `setport`（它会同步所有已注册客户端）；再重新信任一次连接器 |
+| 换了端口但客户端没跟上 | 端口在 `config.toml` 的 `port` 里改，客户端不用动。若某个客户端条目里还写死了 `COMSOL_PORT`，删掉那个键（或重新注册一次） |
 | 表格里出现 4 位小数 | COMSOL 表格显示格式固定，不可配置。需要整数显示时用参数（Parameters）承载，参数值原样显示 |
 | 模型关闭时提示"是否保存" | 正常现象：签名表/参数属于模型的一部分，保存即可，随 `.mph` 一起留存 |
 
@@ -126,12 +136,12 @@ COMSOLPilot 接入后**不向模型写入任何节点**（早期版本的签名�
 
 **认证与会话（09-13 实测补充）**
 
-13. **[需知晓]** 连接器报 `No user name and password could be obtained`：服务端用 `-login auto` 启动时，**服务端的用户库要靠 Desktop 先登录一次才建立**；在此之前任何 API 客户端（MPh/mph）都认证不了。正确顺序是：双击 bat 起服务端 → 在 Desktop 里 `文件 > COMSOL Multiphysics Server > Connect to Server`（localhost:2036，admin）登录一次 → 再让连接器连接。验证方法：服务端日志出现 `用户名为 'admin' 的 COMSOL Multiphysics 客户端已从 '<主机>' 登录` 即表示可以了（自检脚本 `scripts/check_comsol_login.py` 或启动器菜单 [6] 可直接检查这一整条链）。
+13. **[需知晓]** 连接器报 `No user name and password could be obtained`：服务端用 `-login auto` 启动时，**服务端的用户库要靠 Desktop 先登录一次才建立**；在此之前任何 API 客户端（MPh/mph）都认证不了。正确顺序是：双击 bat 起服务端 → 在 Desktop 里 `文件 > COMSOL Multiphysics Server > Connect to Server`（localhost:2036，admin）登录一次 → 再让连接器连接。验证方法：服务端日志出现 `用户名为 'admin' 的 COMSOL Multiphysics 客户端已从 '<主机>' 登录` 即表示可以了（自检：`python scripts/check_comsol_login.py` 可直接检查这一整条链）。
 14. **[需知晓]** 服务端不要从脚本/工具调用的进程树里启动：那样的进程会随调用结束被回收，且环境与交互会话不一致（第 10 条的完整解释）。要"无人值守"地拉起，可用计划任务/后台常驻任务，但**认证仍需一次 Desktop 登录**。
 
 15. **[必须知晓] 多版本共存导致认证失败（09-13 全程排查结论）**：机器上同时装了 `E://Comsol Multiphysics 6.2`（本项目启动的服务端）与 `E://COMSOL Multiphysics 6.4` 时，mph 的自动发现会挑**最新版**（6.4），于是客户端库 6.4 去连 6.2 服务端 —— 握手失败，报的却是极具误导性的 `No user name and password could be obtained`。修复已内置：`session.py` 的 `pinned_version()` 按 `COMSOL_MCP_VERSION` → `workspace/runtime.json` 记录的 COMSOL 路径 → `settings.json` 的顺序**钉定版本**（实测 `pinned_version() = 6.2`）。**排查口诀**：认证类报错先确认客户端与服务端版本一致，再看凭据。
 
-16. **[必须知晓] COMSOL 6.4 暂不能作为 MCP 服务端（09-13 实测结论）**：6.4 把 client 侧的建模 API 换成了新的声明式 clientapi（`com.comsol.clientapi.impl`）——`ModelUtil.createUnique()` 返回 `ModelClient`，`component().create()` 返回没有 `.geometry()` 工厂的通用节点，连 `java.model(tag)` 都会报"未知模型"。本项目全部 104 个工具建立在内核 API（`com.comsol.model`）上，mph 1.4.0（2026-08-30）也未适配此变化，因此在 6.4 服务端上**所有建模工具都会失败**。已内置防护：`comsol_status` 会报告 `api_compatibility`（kernel/clientapi），clientapi 时附明确警告。**当前正确用法**：服务端保持 6.2（启动器菜单 [4] 可选版本）；6.4 Desktop 可以开，但别让它连 MCP 服务端。未来若要支持 6.4，需要按 clientapi 重写整个工具层或等 mph 官方适配。
+16. **[必须知晓] COMSOL 6.4 暂不能作为 MCP 服务端（09-13 实测结论）**：6.4 把 client 侧的建模 API 换成了新的声明式 clientapi（`com.comsol.clientapi.impl`）——`ModelUtil.createUnique()` 返回 `ModelClient`，`component().create()` 返回没有 `.geometry()` 工厂的通用节点，连 `java.model(tag)` 都会报"未知模型"。本项目全部 104 个工具建立在内核 API（`com.comsol.model`）上，mph 1.4.0（2026-08-30）也未适配此变化，因此在 6.4 服务端上**所有建模工具都会失败**。已内置防护：`comsol_status` 会报告 `api_compatibility`（kernel/clientapi），clientapi 时附明确警告。**当前正确用法**：服务端保持 6.2（在 `config.toml` 里设 `version = "6.2"`）；6.4 Desktop 可以开，但别让它连 MCP 服务端。未来若要支持 6.4，需要按 clientapi 重写整个工具层或等 mph 官方适配。
 
 **会话阶段（最容易浪费时间）**
 

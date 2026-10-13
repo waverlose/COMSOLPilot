@@ -28,6 +28,7 @@ import os
 import re
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,19 @@ _QUIET_TOOLS = {
     "param_get",
     "material_list",
     "datasets_list",
+    "reference_search",
+    "reference_index_document",
+    "knowledge_record_issue",
+    "knowledge_list_issues",
+    "knowledge_update_issue",
+    "knowledge_search",
+    "comsol_environment",
+    "comsol_list_versions",
+}
+
+_NO_AUTOSAVE_TOOLS = {
+    "reference_search", "reference_index_document", "knowledge_record_issue",
+    "knowledge_list_issues", "knowledge_update_issue", "knowledge_search",
 }
 
 _LOG_LOCK = threading.Lock()
@@ -155,10 +169,11 @@ def summarize_arguments(arguments: Any, limit: int = 160) -> str:
 
 
 def record_tool_call(name: str, arguments: Any, status: str,
-                     duration_ms: float, error: str | None = None) -> None:
+                     duration_ms: float, error: str | None = None,
+                     issue_id: str | None = None) -> None:
     """Append one structured line to the JSONL call log. Never raises."""
     entry = {
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "ts": datetime.now().astimezone().isoformat(),
         "tool": name,
         "status": status,
         "duration_ms": round(duration_ms, 1),
@@ -166,6 +181,8 @@ def record_tool_call(name: str, arguments: Any, status: str,
     }
     if error:
         entry["error"] = error[:400]
+    if issue_id:
+        entry["knowledge_issue_id"] = issue_id
     try:
         with _LOG_LOCK:
             with open(_log_path(), "a", encoding="utf-8") as handle:
@@ -367,8 +384,12 @@ def install_observability(mcp: Any) -> int:
                             push_comsol_message(
                                 f"{PREFIX} ~ {_name} server busy, retry {attempts}/2")
                         continue
+                    from .knowledge import capture_tool_failure
+
+                    issue_id = capture_tool_failure(_name, str(exc))
                     record_tool_call(_name, kwargs, "error",
-                                     (time.perf_counter() - started) * 1000.0, str(exc))
+                                     (time.perf_counter() - started) * 1000.0,
+                                     str(exc), issue_id)
                     if _name not in _QUIET_TOOLS:
                         push_comsol_message(f"{PREFIX} < {_name} FAILED: {str(exc)[:120]}")
                     raise
@@ -386,8 +407,16 @@ def install_observability(mcp: Any) -> int:
                 result["hint"] = _BUSY_HINT
             elapsed = (time.perf_counter() - started) * 1000.0
             failed = isinstance(result, dict) and result.get("success") is False
+            issue_id = None
+            if failed:
+                from .knowledge import capture_tool_failure
+
+                issue_id = capture_tool_failure(_name, str(result.get("error") or result.get("message") or "Tool failed"))
+                if issue_id:
+                    result["knowledge_issue_id"] = issue_id
             record_tool_call(_name, kwargs, "failed" if failed else "ok", elapsed,
-                             result.get("error") if failed and isinstance(result, dict) else None)
+                             result.get("error") if failed and isinstance(result, dict) else None,
+                             issue_id)
             # Announce even when the call failed afterwards: the model exists
             # and the user still has to open it in Desktop.
             if before_models is not None and isinstance(result, dict):
@@ -395,7 +424,7 @@ def install_observability(mcp: Any) -> int:
                 if notice:
                     result["user_notice"] = notice
                     push_comsol_message(f"{PREFIX}: {notice}")
-            if not failed:
+            if not failed and _name not in _NO_AUTOSAVE_TOOLS:
                 _request_autosave(force=(_name in _MILESTONE_TOOLS))
             if _name not in _QUIET_TOOLS:
                 marker = "FAILED" if failed else "done"

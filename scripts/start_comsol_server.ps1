@@ -416,39 +416,59 @@ if (-not (Test-PortBindable -PortNumber $Port)) {
     $Port = $fallbackPort
 }
 
-# Same for the authentication mode: the launcher's choice (settings.json) is
-# used when the switch is missing, so the .bat and the menu behave alike.
-if (-not $PSBoundParameters.ContainsKey("LoginMode")) {
+# The launcher and the MCP connector share ONE configuration file: config.toml
+# at the repository root. It is read through Python (which owns the parser),
+# with the older workspace/settings.json kept as a fallback for absent keys.
+$resolvedPython = Find-PythonExe -Explicit $PythonExe
+
+function Get-ConfiguredValue {
+    param([string]$Section, [string]$Key)
+    $helper = Join-Path $root "scripts\show_config.py"
+    if (-not $resolvedPython -or -not (Test-Path -LiteralPath $helper)) {
+        return ""
+    }
     try {
-        $settingsPath = Join-Path $root "workspace\settings.json"
-        if (Test-Path -LiteralPath $settingsPath) {
-            $configured = [string]((Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json).login_mode)
-            if ($configured -in @("auto", "never", "info", "force")) {
-                $LoginMode = $configured
-            }
-        }
+        Remove-DuplicateCaseEnvironmentVariables
+        $value = & $resolvedPython $helper $Section $Key 2>$null | Select-Object -Last 1
+        if ($null -eq $value) { return "" }
+        return ([string]$value).Trim()
     }
     catch {
+        return ""
     }
 }
 
-$resolvedPython = Find-PythonExe -Explicit $PythonExe
-
-# No -Version on the command line: honour the version picked in the launcher
-# (workspace/settings.json), so double-clicking the .bat behaves exactly like
-# starting from the menu and cannot silently launch the other installation.
-if (-not $Version) {
+function Get-SettingValue {
+    param([string]$Key)
+    $settingsPath = Join-Path $root "workspace\settings.json"
+    if (-not (Test-Path -LiteralPath $settingsPath)) { return "" }
     try {
-        $settingsPath = Join-Path $root "workspace\settings.json"
-        if (Test-Path -LiteralPath $settingsPath) {
-            $Version = [string]((Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json).comsol_version)
-        }
+        $json = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+        return [string]($json.$Key)
     }
     catch {
-        $Version = ""
+        return ""
     }
+}
+
+# Authentication mode: the command-line switch wins, then config.toml, then the
+# older settings.json, so the .bat and the menu behave alike.
+if (-not $PSBoundParameters.ContainsKey("LoginMode")) {
+    $configured = Get-ConfiguredValue -Section "comsol" -Key "login_mode"
+    if (-not $configured) { $configured = Get-SettingValue -Key "login_mode" }
+    if ($configured -in @("auto", "never", "info", "force")) {
+        $LoginMode = $configured
+    }
+}
+
+# COMSOL version: config.toml first, then settings.json, so double-clicking the
+# .bat behaves exactly like starting from the menu and cannot silently launch
+# the other installation.
+if (-not $Version) {
+    $Version = Get-ConfiguredValue -Section "comsol" -Key "version"
+    if (-not $Version) { $Version = Get-SettingValue -Key "comsol_version" }
     if ($Version) {
-        Write-Host "COMSOL version from settings.json: $Version"
+        Write-Host "COMSOL version from config.toml: $Version"
     }
 }
 

@@ -1,5 +1,6 @@
 """Results evaluation and export tools for COMSOLPilot."""
 
+import json
 from typing import Optional, Union, Sequence
 from pathlib import Path
 from mcp.server.fastmcp import FastMCP
@@ -357,7 +358,7 @@ def register_results_tools(mcp: FastMCP) -> None:
         if not final:
             try:
                 settings_path = (
-                    pathlib.Path(__file__).resolve().parent.parent.parent
+                    Path(__file__).resolve().parent.parent.parent
                     / "workspace" / "settings.json")
                 cfg = json.loads(settings_path.read_text(encoding="utf-8"))
                 final = str(cfg.get("table_label") or "").strip()

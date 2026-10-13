@@ -31,7 +31,34 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-ENTRY_NAME = "comsolpilot"
+DEFAULT_ENTRY_NAME = "comsolpilot"
+# Kept for backwards compatibility; prefer entry_name().
+ENTRY_NAME = DEFAULT_ENTRY_NAME
+
+
+def entry_name() -> str:
+    """Name of the connector entry written into client configs.
+
+    Resolution: COMSOLPILOT_ENTRY_NAME -> config.toml [connector].entry_name ->
+    "comsolpilot". A non-default name lets a second, parallel install (a test
+    build beside the released one) register without overwriting the other entry.
+    """
+    env = (os.environ.get("COMSOLPILOT_ENTRY_NAME") or "").strip()
+    if env:
+        return env
+    try:
+        from . import config as project_config
+
+        configured = str(project_config.get("connector", "entry_name") or "").strip()
+        if configured:
+            return configured
+    except Exception:
+        pass
+    return DEFAULT_ENTRY_NAME
+
+
+def _is_custom_entry_name() -> bool:
+    return entry_name() != DEFAULT_ENTRY_NAME
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -54,7 +81,12 @@ def python_exe() -> str:
 def _env_block(port: int) -> dict[str, str]:
     """Environment for the connector process.
 
-    Three hard lessons from new-user pitfalls, all auto-handled here:
+    Deliberately minimal: port, mode, version and autostart all live in the
+    project's config.toml, which the connector reads itself. Duplicating them
+    here would mean editing config.toml had no effect - and it would have to be
+    repeated in every client's config.
+
+    What must be passed explicitly, because clients get it wrong or drop it:
 
     - several MCP clients ignore the ``cwd`` field entirely, so the process
       would start in a random directory and die with
@@ -67,11 +99,6 @@ def _env_block(port: int) -> dict[str, str]:
       under the default GBK code page.
     """
     env = {
-        "COMSOL_MODE": "gui",
-        "COMSOL_HOST": "localhost",
-        "COMSOL_PORT": str(port),
-        "COMSOL_PREWARM": "on",
-        "COMSOL_PREWARM_WAIT": "20",
         "PYTHONPATH": str(project_root()),
         "PYTHONUTF8": "1",
         "PYTHONIOENCODING": "utf-8",
@@ -81,6 +108,15 @@ def _env_block(port: int) -> dict[str, str]:
         if value:
             env[key] = value
     return env
+
+
+# Keys this project used to write into client configs. They are owned by
+# config.toml now, so a re-registration removes stale copies instead of leaving
+# an old value silently overriding the file.
+MANAGED_ENV_KEYS = frozenset({
+    "COMSOL_MODE", "COMSOL_HOST", "COMSOL_PORT",
+    "COMSOL_PREWARM", "COMSOL_PREWARM_WAIT", "COMSOL_AUTOSTART",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -225,51 +261,44 @@ def _sync_json(target: Target, path: Path, port: int, ensure: bool,
     if not isinstance(section, dict):
         return {**result, "action": "skipped", "reason": "no mcpServers/mcp object"}
 
-    existing_name = ENTRY_NAME if isinstance(section.get(ENTRY_NAME), dict) else None
-    if existing_name is None:
-        for name, spec in section.items():
-            if _is_comsol_entry(str(name), spec):
-                existing_name = str(name)
+    name = entry_name()
+    existing_name = name if isinstance(section.get(name), dict) else None
+    if existing_name is None and not _is_custom_entry_name():
+        # Only adopt a differently-named entry when using the default name;
+        # a custom name must never grab (and rewrite) another install's entry.
+        for other, spec in section.items():
+            if _is_comsol_entry(str(other), spec):
+                existing_name = str(other)
                 break
 
     if existing_name is not None:
         spec = section[existing_name]
         if not isinstance(spec, dict):
             return {**result, "action": "skipped", "reason": "existing entry is not an object"}
-        current = _port_of_existing(spec)
         new_spec = _entry_for_kind(target.kind, port)
         merged = dict(spec)
         for key, value in new_spec.items():
-            if key == "env" and isinstance(spec.get("env"), dict):
-                env = dict(spec["env"])
+            if key in ("env", "environment") and isinstance(spec.get(key), dict):
+                env = {k: v for k, v in spec[key].items() if k not in MANAGED_ENV_KEYS}
                 env.update(value)
-                merged["env"] = env
-            elif key == "environment" and isinstance(spec.get("environment"), dict):
-                env = dict(spec["environment"])
-                env.update(value)
-                merged["environment"] = env
+                merged[key] = env
             else:
                 merged[key] = value
-        # Merge even when the port already matches: entries written by older
-        # versions lack PYTHONPATH / UTF-8 / the Windows variables the COMSOL
-        # client needs to find its login file, which breaks the connector with
-        # "No user name and password could be obtained".
+        # Compare the managed environment only: entries written by older
+        # versions carry COMSOL_PORT / COMSOL_MODE, which config.toml owns now.
         env_key = "environment" if "environment" in new_spec else "env"
-        env_before = dict(spec.get(env_key) or {})
+        env_before = {k: v for k, v in (spec.get(env_key) or {}).items()
+                      if k not in MANAGED_ENV_KEYS}
         env_after = dict(merged.get(env_key) or {})
-        if current == str(port) and env_before == env_after:
-            return {**result, "action": "ok", "detail": f"COMSOL_PORT already {port}"}
+        if env_before == env_after and set(spec.get(env_key) or {}) == set(env_after):
+            return {**result, "action": "ok", "detail": "entry up to date"}
         section[existing_name] = merged
         result["action"] = "updated"
-        if current == str(port):
-            added = sorted(set(env_after) - set(env_before))
-            result["detail"] = "env refreshed" + (f" (+{', '.join(added)})" if added else "")
-        else:
-            result["detail"] = f"COMSOL_PORT {current or '(unset)'} -> {port}"
+        result["detail"] = "env refreshed; port/mode/autostart come from config.toml"
     elif ensure:
-        section[ENTRY_NAME] = _entry_for_kind(target.kind, port)
+        section[entry_name()] = _entry_for_kind(target.kind, port)
         result["action"] = "created"
-        result["detail"] = f"entry '{ENTRY_NAME}' added with COMSOL_PORT={port}"
+        result["detail"] = f"entry '{entry_name()}' added with COMSOL_PORT={port}"
     else:
         return {**result, "action": "skipped", "reason": "no existing entry (use --ensure)"}
 
@@ -302,7 +331,7 @@ def _write_json(path: Path, config: dict[str, Any]) -> dict[str, Any]:
         text = json.dumps(config, ensure_ascii=False, indent=2) + "\n"
         parsed = json.loads(text)
         section = parsed.get("mcpServers") or parsed.get("mcp")
-        if not isinstance(section, dict) or not isinstance(section.get(ENTRY_NAME), dict):
+        if not isinstance(section, dict) or not isinstance(section.get(entry_name()), dict):
             return {"written": False, "action": "failed", "reason": "generated config has no comsolpilot entry"}
         if path.is_file():
             shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
@@ -335,7 +364,8 @@ def _toml_inline_table(mapping: dict[str, str]) -> str:
 
 def _codex_block(port: int) -> str:
     entry = _entry_for_kind("codex_toml", port)
-    lines = [f"[mcp_servers.{ENTRY_NAME}]",
+    lines = [f"[mcp_servers.{entry_name()}]",
+             f"type = {_toml_literal('stdio')}",
              f"command = {_toml_literal(entry['command'])}",
              f"args = {_toml_inline_array(entry['args'])}",
              f"cwd = {_toml_literal(entry['cwd'])}",
@@ -343,7 +373,14 @@ def _codex_block(port: int) -> str:
     return "\n".join(lines)
 
 
-_SECTION_HEADER = re.compile(r"^\[mcp_servers\.comsolpilot\]\s*$", re.MULTILINE)
+_SECTION_HEADER_TEXT = r"^\[mcp_servers\.{name}\]\s*$"
+
+
+def _section_header():
+    import re as _re
+
+    return _re.compile(_SECTION_HEADER_TEXT.format(name=_re.escape(entry_name())),
+                       _re.MULTILINE)
 _NEXT_HEADER = re.compile(r"^\[", re.MULTILINE)
 _TOML_PORT = re.compile(r"COMSOL_PORT\s*=\s*[\"']?(\d+)")
 
@@ -353,7 +390,7 @@ def _sync_codex(target: Target, path: Path, port: int, ensure: bool,
     result: dict[str, Any] = {"client": target.key, "label": target.label,
                               "path": str(path)}
     text = path.read_text(encoding="utf-8") if path.is_file() else ""
-    match = _SECTION_HEADER.search(text)
+    match = _section_header().search(text)
     if match:
         start = match.start()
         following = _NEXT_HEADER.search(text, match.end())
@@ -367,14 +404,14 @@ def _sync_codex(target: Target, path: Path, port: int, ensure: bool,
         action, detail = "updated", f"COMSOL_PORT {current or '(unset)'} -> {port}"
     elif ensure:
         new_text = (text.rstrip("\n") + "\n\n" if text.strip() else "") + _codex_block(port) + "\n"
-        action, detail = "created", f"entry '{ENTRY_NAME}' added with COMSOL_PORT={port}"
+        action, detail = "created", f"entry '{entry_name()}' added with COMSOL_PORT={port}"
     else:
         return {**result, "action": "skipped", "reason": "no existing entry (use --ensure)"}
 
     if dry_run:
         return {**result, "action": action, "detail": detail, "dry_run": True}
     try:
-        if not _SECTION_HEADER.search(new_text):
+        if not _section_header().search(new_text):
             return {**result, "action": "failed", "reason": "generated TOML has no comsolpilot section"}
         if path.is_file():
             shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))

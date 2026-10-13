@@ -137,7 +137,7 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     except Exception as exc:  # noqa: BLE001
         bad(f"Discovery failed: {exc}")
     if not comsol_ok:
-        info("Set COMSOL_SERVER_EXE or pass -ServerExe to start_comsol_server.bat")
+        info("Set COMSOL_SERVER_EXE, or let the assistant run comsol_start_server")
 
     head("4. Session / port")
     host, port, mode = _host_env(), _port_env(), _mode_env()
@@ -146,23 +146,27 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
         ok(f"A COMSOL server is listening on {host}:{port}")
     elif _port_bindable(port):
         warn(f"Nothing listening on {host}:{port} yet")
-        info("Start it with: start_comsol_server.bat")
+        info("Start it with start_comsol_server.bat, or ask the assistant to run comsol_start_server")
     else:
         warn(f"Port {port} cannot be bound (held by another process, often an ephemeral socket)")
-        info("start_comsol_server.bat will pick the next free port and tell you which one")
+        info("comsol_start_server (or start_comsol_server.bat) picks the next free port and says which")
     if mode == "gui":
-        info("GUI mode needs the server running BEFORE the MCP connector starts")
+        info("GUI mode attaches to a running server; comsol_start_server or COMSOL_AUTOSTART=on provides one")
 
     head("5. MCP surface")
     try:
         from src.server import mcp, register_all_tools
+        from src.tools.gateway import known_tools
+
         register_all_tools()
-        count = len(mcp._tool_manager._tools)
+        total = len(known_tools(mcp))
+        visible = len(mcp._tool_manager._tools)
         try:
             prompt_count = len(mcp._prompt_manager._prompts)
         except Exception:
             prompt_count = 0
-        ok(f"{count} tools, {prompt_count} prompt templates registered")
+        ok(f"{total} tools ({visible} visible, {total - visible} behind tools_call), "
+           f"{prompt_count} prompt templates registered")
     except Exception as exc:  # noqa: BLE001
         bad(f"Registration failed: {exc}")
         failures += 1
@@ -227,6 +231,10 @@ def cmd_config(args: argparse.Namespace) -> int:
 
 
 _TOOL_GROUPS = (
+    ("Environment / setup", ("comsol_environment", "comsol_list_versions",
+                             "comsol_set_preferences", "comsol_configure_client",
+                             "comsol_start_server", "comsol_stop_server",
+                             "comsol_open_desktop")),
     ("Session", ("comsol_",)),
     ("Model", ("model_",)),
     ("Geometry", ("geometry_",)),
@@ -242,8 +250,10 @@ _TOOL_GROUPS = (
 
 def cmd_tools(args: argparse.Namespace) -> int:
     from src.server import mcp, register_all_tools
+    from src.tools.gateway import known_tools
+
     register_all_tools()
-    names = sorted(mcp._tool_manager._tools.keys())
+    names = sorted(known_tools(mcp))
 
     if not args.group:
         head(f"{len(names)} tools")
@@ -388,7 +398,7 @@ def cmd_onboard(args: argparse.Namespace) -> int:
 
     cmd_config(argparse.Namespace(port=args.port, client=args.client))
     head("You are set up when these are true")
-    info("start_comsol_server.bat says the server started")
+    info("The COMSOL server is up (start_comsol_server.bat, or ask the AI: comsol_start_server)")
     info("The connector page shows comsolpilot as trusted/enabled")
     info("Asking the AI 'check COMSOLPilot status' returns connected: true")
     head("Then try")

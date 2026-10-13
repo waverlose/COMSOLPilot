@@ -26,17 +26,35 @@ if a step reports `success: false`:
 2. `workflow_validate_spec` -- validate the spec before touching COMSOL.
 3. `workflow_execute_spec` -- execute it.
 
+Tool access: only a few tools are visible directly (`tools_catalog`,
+`tools_describe`, `tools_call`); every other tool named here is reached through
+`tools_call(name, arguments)`. Find a name with `tools_catalog`, check its
+parameters with `tools_describe`, then run it -- e.g.
+`tools_call('workflow_execute_spec', {'spec': {...}, 'solve': true})`. If the
+server advertises a flat surface, the same names are callable directly.
+
 Conventions that this COMSOL version actually requires:
 - Boundary condition `type` is the friendly alias (`Temperature`, `HeatFlux`,
   `ConvectiveHeatFlux`, `Fixed`, `Roller`, `Ground`, `ElectricPotential`). The
   server maps it to the real feature id.
 - All geometry coordinates are SI metres.
-- A `where.box` must contain the face with room to spare. If it selects nothing
-  the server raises a clear error rather than building a singular model; fall
-  back to `"where": {"boundaries": [id, ...]}` when you know the face ids.
+- Name faces symbolically instead of computing a box: `{"where": {"face": "zmin"}}`
+  (the face at minimum z), `{"faces": ["zmin", "zmax"]}`, `{"normal": "+z"}`, or
+  `{"outer": true}` for the whole exterior. This is the reliable default; reach for a
+  `where.box` only when the load covers part of a face, not the whole face.
+- When you do use a `where.box`, it must contain the face with room to spare. If it
+  selects nothing the server raises a clear error rather than building a singular
+  model; fall back to `"where": {"boundaries": [id, ...]}` when you know the face ids.
 - After solving, check the reported outputs against the boundary values you
   imposed. A field that overshoots its own boundary data is not trustworthy and
   the server will flag it in `solve_error`.
+- On a modeling error, search `knowledge_search` and `reference_search` using the
+  error text and the current COMSOL version. Cite the returned source URL or
+  local manual section when using it to suggest a fix. Tool failures are saved
+  automatically as unverified notes; use `knowledge_list_issues` to find them.
+  After a fix succeeds, document the cause and resolution with
+  `knowledge_update_issue`, including the successful verification tool and what
+  its result demonstrated. Do not claim a fix is verified from a guess alone.
 """
 
 

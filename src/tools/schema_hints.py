@@ -60,8 +60,17 @@ PARAMETER_HINTS = {
     "host": "COMSOL server hostname. For local GUI sync, use 'localhost'.",
     "port": "Fixed COMSOL GUI/server port. Default is 2036.",
     "standalone": "Deprecated compatibility flag. Use mode='headless' for background operation.",
-    "mode": "COMSOL session mode: 'ask' requires the user to choose, 'gui' requires port 2036, 'headless' starts a background JVM, and 'auto' probes first.",
-    "autostart_server": "Advanced opt-in. If true, comsol_start may launch a local COMSOL Server for GUI mode. Default is false; prefer start_comsol_server.bat.",
+    "mode": "COMSOL session mode: 'gui' starts a Desktop-attachable server, 'headless' starts a background JVM, 'auto' attaches to a running server or starts one, and 'ask' makes the user choose.",
+    "autostart_server": "If true, comsol_start launches a local COMSOL Server for GUI mode. Use comsol_start_server for the full conversation-driven start-up.",
+    "open_desktop": "When GUI mode starts a server, also open COMSOL Desktop so it can attach and watch. Defaults to the saved preference.",
+    "version": "COMSOL version to use, for example '6.2'. Empty means auto (newest installed).",
+    "cores": "Number of processor cores COMSOL may use. Omit to use all available cores.",
+    "login_mode": "COMSOL server authentication: 'auto', 'never', 'info' or 'force'.",
+    "autostart": "Whether the connector may start COMSOL itself when no server is listening.",
+    "table_label": "Opt-in label used to rename AI-created COMSOL tables. Empty disables renaming.",
+    "clients": "MCP client keys to act on, for example ['claude-code']. Omit to use every detected client.",
+    "ensure": "Create the entry where it does not exist yet. Without it only existing entries are updated.",
+    "dry_run": "Report what would change without writing anything. Defaults to true for safety.",
     "model_name": "Loaded model name. Omit or pass null to use the current active model.",
     "component_name": "COMSOL component tag, for example 'comp1'. Create it before geometry or physics tools.",
     "geometry_name": "COMSOL geometry sequence tag, for example 'geom1'. Create it with geometry_create before adding features.",
@@ -115,6 +124,8 @@ PARAMETER_HINTS = {
     "outer": "Parametric sweep outer solution index or list of indices.",
     "file_path": "Filesystem path. Use an absolute path when the server working directory is uncertain.",
     "format": "COMSOL save format.",
+    "query": "Space-separated keywords matched against tool names and summaries, for example 'heat flux'.",
+    "category": "Only tools whose name contains this text, for example 'geometry' or 'results'.",
 }
 
 PRIMARY_WORKFLOW_DESCRIPTION = (
@@ -144,6 +155,9 @@ FUNCTION_PARAM_HINTS = {
     ("geometry_add_feature", "selections"): "Feature selection inputs passed to feature.selection(name).set(values), for example {'input': ['blk1'], 'input2': ['cyl1']}.",
     ("model_execute_python", "script"): "Advanced COMSOL automation script. Use this for Java API operations such as ParametricCurve, Sweep, Extrude, Fillet, and custom result nodes.",
     ("model_execute_python", "confirm"): "Must be exactly EXECUTE_COMSOL_PYTHON. This tool runs trusted local code inside the MCP server process.",
+    ("tools_call", "name"): "Exact tier-2 tool name from tools_catalog, for example 'geometry_add_block'.",
+    ("tools_call", "arguments"): "Object of the target tool's parameters, for example {'size': [0.1, 0.1, 0.1]}. Call tools_describe(name) to see them.",
+    ("tools_describe", "name"): "Exact tool name from tools_catalog, for example 'physics_boundary_selection'.",
 }
 
 

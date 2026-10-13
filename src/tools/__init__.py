@@ -1,6 +1,8 @@
 """MCP Tools for COMSOL operations."""
 
 from .session import register_session_tools
+from .admin import register_admin_tools
+from .gateway import register_gateway_tools
 from .model import register_model_tools
 from .parameters import register_parameter_tools
 from .geometry import register_geometry_tools
@@ -13,6 +15,8 @@ from .workflow import register_workflow_tools
 
 __all__ = [
     "register_session_tools",
+    "register_admin_tools",
+    "register_gateway_tools",
     "register_model_tools",
     "register_parameter_tools",
     "register_geometry_tools",

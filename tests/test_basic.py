@@ -8,15 +8,18 @@ def reset_session_manager():
     from src.tools.session import SessionManager
 
     sm = SessionManager()
-    sm._client = None
-    sm._server = None
-    sm._models.clear()
-    sm._current_model = None
+
+    def clear():
+        sm._client = None
+        sm._server = None
+        sm._retired_client = None
+        sm._jvm_started = False
+        sm._models.clear()
+        sm._current_model = None
+
+    clear()
     yield
-    sm._client = None
-    sm._server = None
-    sm._models.clear()
-    sm._current_model = None
+    clear()
 
 
 class TestVersioning:
@@ -139,31 +142,74 @@ class TestSessionManager:
         assert result["success"] is False
         assert result["mode"] == "gui"
         assert result["port"] == 2036
-        assert "start_comsol_server.bat" in result["error"]
+        assert "comsol_start_server" in result["error"]
         assert sm.client is None
 
-    def test_gui_mode_autostart_is_explicit_opt_in(self, monkeypatch):
+    def test_gui_mode_autostart_is_explicit_opt_in(self, monkeypatch, tmp_path):
         from src.tools import session as session_module
         from src.tools.session import SessionManager
 
         sm = SessionManager()
-        server = self.FakeServer()
         client = self.FakeClient()
+
+        class FakeProcess:
+            pid = 4321
+
+            def poll(self):
+                return None
+
         monkeypatch.setattr(session_module, "_ensure_windows_architecture_fallback", lambda: None)
+        monkeypatch.setattr(session_module, "workspace_dir", lambda: tmp_path)
         monkeypatch.setattr(sm, "_server_is_listening", lambda host, port, timeout=1.0: False)
-        monkeypatch.setattr(session_module.mph, "Server", lambda cores=None, version=None, port=2036, multi="on": server)
-        monkeypatch.setattr(session_module.mph, "Client", lambda port=2036, host="localhost": client)
+        monkeypatch.setattr(
+            session_module, "_launch_server_process",
+            lambda port=None, version=None, cores=None, timeout=240.0: {
+                "success": True, "port": 2036, "pid": 4321,
+                "exe": "comsolmphserver.exe", "log": str(tmp_path / "srv.log"),
+                "process": FakeProcess(), "relocated": False})
+        monkeypatch.setattr(session_module.mph, "Client", lambda port=2036, host="localhost", version=None: client)
 
         result = sm.start(mode="gui", port=2036, autostart_server=True)
 
-        assert result["success"] is True
+        assert result["success"] is True, result
         assert result["mode"] == "gui"
         assert result["port"] == 2036
         assert result["connected_to"] == "new_server"
         assert sm.client is client
-        assert sm._server is server
+        assert sm._server is not None
 
-    def test_auto_mode_falls_back_to_headless_when_fixed_port_is_closed(self, monkeypatch):
+    def test_gui_mode_adopts_a_relocated_server_port(self, monkeypatch, tmp_path):
+        """COMSOL may bind a different port than asked; the session must adopt it."""
+        from src.tools import session as session_module
+        from src.tools.session import SessionManager
+
+        sm = SessionManager()
+        client = self.FakeClient()
+
+        class FakeProcess:
+            pid = 777
+
+            def poll(self):
+                return None
+
+        monkeypatch.setattr(session_module, "_ensure_windows_architecture_fallback", lambda: None)
+        monkeypatch.setattr(session_module, "workspace_dir", lambda: tmp_path)
+        monkeypatch.setattr(sm, "_server_is_listening", lambda host, port, timeout=1.0: False)
+        monkeypatch.setattr(
+            session_module, "_launch_server_process",
+            lambda port=None, version=None, cores=None, timeout=240.0: {
+                "success": True, "port": 2051, "pid": 777,
+                "exe": "comsolmphserver.exe", "log": str(tmp_path / "srv.log"),
+                "process": FakeProcess(), "relocated": True})
+        monkeypatch.setattr(session_module.mph, "Client", lambda port=2036, host="localhost", version=None: client)
+
+        result = sm.start(mode="gui", port=2050, autostart_server=True)
+
+        assert result["success"] is True, result
+        assert result["port"] == 2051
+        assert result["relocated_from"] == 2050
+
+    def test_auto_mode_falls_back_to_headless_when_fixed_port_is_closed(self, monkeypatch, tmp_path):
         from src.tools import session as session_module
         from src.tools.session import SessionManager
 
@@ -172,6 +218,8 @@ class TestSessionManager:
         client.standalone = True
 
         monkeypatch.setattr(session_module, "_ensure_windows_architecture_fallback", lambda: None)
+        # A session start records workspace/runtime.json; keep that off the repo.
+        monkeypatch.setattr(session_module, "workspace_dir", lambda: tmp_path)
         monkeypatch.setattr(sm, "_server_is_listening", lambda host, port, timeout=1.0: False)
         monkeypatch.setattr(session_module.mph, "start", lambda cores=None, version=None: client)
 
@@ -181,6 +229,24 @@ class TestSessionManager:
         assert result["connected_to"] == "standalone_jvm"
         assert result["mode"] == "headless"
         assert sm.client is client
+
+    def test_local_server_without_a_popen_handle(self, monkeypatch):
+        """A WMI-launched server has no Popen handle; stop falls back to its pid."""
+        from src.tools import session as session_module
+        from src.tools.session import LocalServer
+
+        server = LocalServer(port=2036, process=None, pid=4242)
+        monkeypatch.setattr(session_module, "port_listening",
+                            lambda host, port, timeout=0.5: False)
+        assert server.running() is False
+
+        seen = {}
+        monkeypatch.setattr(session_module.subprocess, "run",
+                            lambda cmd, **kwargs: seen.setdefault("cmd", cmd))
+        server.stop()
+
+        assert seen["cmd"][:3] == ["taskkill", "/F", "/PID"]
+        assert "4242" in seen["cmd"]
 
     def test_disconnect_releases_client_reference(self):
         from src.tools.session import SessionManager
@@ -247,7 +313,7 @@ class TestToolSchemas:
         assert "script" in advanced_schema
         assert advanced_schema["confirm"]["description"].startswith("Must be exactly EXECUTE_COMSOL_PYTHON")
         start_schema = mcp._tool_manager.get_tool("comsol_start").parameters["properties"]
-        assert "start_comsol_server.bat" in start_schema["autostart_server"]["description"]
+        assert "comsol_start_server" in start_schema["autostart_server"]["description"]
         feature_schema = mcp._tool_manager.get_tool("geometry_add_feature").parameters["properties"]
         assert {"properties", "selections", "build"}.issubset(feature_schema)
         assert "kwargs" not in feature_schema
