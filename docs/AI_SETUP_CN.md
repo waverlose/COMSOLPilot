@@ -12,9 +12,9 @@
 
 1. 运行 `start_comsol_server.bat` 起 COMSOL 服务端；
 2. 让 MCP 连接器在服务端**已经监听**之后再启动（否则预热失败）；
-3. 改端口 / 换版本要进启动器菜单改 `workspace/settings.json`。
+3. 改端口 / 换版本要进启动器菜单改 `config.toml`。
 
-现在这些步骤全部变成 AI 可调用的工具，配置写进 `workspace/settings.json`，
+现在这些步骤全部变成 AI 可调用的工具，配置写进 `config.toml`，
 由连接器下次启动时生效。
 
 ---
@@ -148,3 +148,24 @@ java.lang.UnsatisfiedLinkError: Can't load library: C:\Users\...\comsolmcp
 `start_comsol_server.bat`、`scripts/sync_mcp_port.py`、`scripts/set_port.py`
 以及 `scripts/start_comsol_server.ps1` **都保留**，功能与新工具一致，仍可继续使用。
 如果你更习惯双击脚本，行为不变；如果你希望全程对话驱动，可以完全不用它们。
+
+---
+
+## 七、升级
+
+代码就是检出目录里的源码（连接器按 `python -m src.server` 直接跑它），所以升级
+等于一次 `git pull`：
+
+```bat
+start_comsol_server.bat upgrade
+```
+
+菜单 `[7]` 是同一件事。它只做快进：
+
+- 本地改动若会被这次升级覆盖，**在动手之前**就拦下来并列出文件名，绝不合并、绝不丢弃；
+- 本地改动若不冲突（例如你改过 `config.toml`），照常升级，改动保留；
+- 落后远端较多时先列出新提交再升，升完告诉你升级前后各是哪个提交；
+- 依赖文件有变动时自动补装；
+- 不是 git 检出（解压安装的）会直接说明，并提示改用 `git clone` 安装。
+
+升完**重开 AI 客户端**才生效——正在跑的那个服务端/连接器进程用的还是旧代码。

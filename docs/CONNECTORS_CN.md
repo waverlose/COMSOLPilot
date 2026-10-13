@@ -11,14 +11,16 @@
 
 1. 检测不到 `.venv` 时：自动寻找 Python → 创建虚拟环境 → 安装依赖（一次性 3~5 分钟）；
 2. 自动发现 COMSOL 安装路径（显式参数 → 环境变量 → mph 库 → C/D/E 盘扫描，成功后缓存）；
-无参数启动时由 `scripts/menu.py` 画出菜单（编号加粗、说明分列、信息行带当前端口/版本/动画）：
+无参数启动时由 `scripts/menu.py` 画出菜单（ASCII 大字标题、编号加粗、说明分列、信息行带当前端口/版本）：
 
 ```
-    COMSOLPilot
-    端口 2036    配置: config.toml
-    ------------------------------------------------------------
+    ____   ___   __  __  ____    ___   _      ____   ___  _       ___   _____
+   / ___| / _ \ |  \/  |/ ___|  / _ \ | |    |  _ \ |_ _|| |     / _ \ |_   _|
+  | |    | | | || |\/| |\___ \ | | | || |    | |_) | | | | |    | | | |  | |
+  | |___ | |_| || |  | | ___) || |_| || |___ |  __/  | | | |___ | |_| |  | |
+   \____| \___/ |_|  |_||____/  \___/ |_____||_|    |___||_____| \___/   |_|
 
-  端口: 2036    COMSOL: auto    动画: plain
+  端口: 2036    COMSOL: auto
 
   [1]  headless 模式             后台运行，不打开窗口
   [2]  gui 模式                  服务端 + COMSOL Desktop
@@ -26,16 +28,18 @@
   [4]  重启 comsol 服务器
   [5]  设置端口
   [6]  设置 COMSOL 版本
+  [7]  升级 COMSOLPilot          从 GitHub 拉取最新版本
 
   [0]  退出
 ```
 
 端口和版本既可以在 **`config.toml`** 里改，也可以直接用菜单 5、6（它们写回 config.toml）。
+菜单 7 从 GitHub 拉取最新版本：只做快进，本地改动若会被覆盖它会先拦下来，绝不替你合并或丢弃。
 
 命令行直达（无菜单、不暂停）：
 
 ```
-start_comsol_server.bat headless | gui | restart | status | stop
+start_comsol_server.bat headless | gui | restart | status | stop | upgrade
 ```
 
 环境变量覆盖：`COMSOL_PORT`、`COMSOL_SERVER_EXE`、`COMSOL_DESKTOP_EXE`。

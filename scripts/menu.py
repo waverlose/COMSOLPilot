@@ -5,7 +5,7 @@ can use the same colours, bold labels and column alignment as the rest of
 COMSOLPilot - cmd's plain ``echo`` cannot do any of that.
 
 Exit code: 0 quit | 1 headless | 2 gui | 3 stop | 4 restart
-           5 port | 6 version | 255 redraw (bad choice / no input)
+           5 port | 6 version | 7 upgrade | 255 redraw (bad choice / no input)
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ ITEMS = [
     ("4", "重启 comsol 服务器", ""),
     ("5", "设置端口", ""),
     ("6", "设置 COMSOL 版本", ""),
+    ("7", "升级 COMSOLPilot", "从 GitHub 拉取最新版本"),
     ("0", "退出", ""),
 ]
 
@@ -106,7 +107,7 @@ def draw(colour: bool) -> None:
         if not colour:
             line = line.replace(BOLD, "").replace(RESET, "")
         print(line)
-        if key == "6":
+        if key == "7":
             print()
     print()
 

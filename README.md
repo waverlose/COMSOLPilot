@@ -110,7 +110,7 @@ itself. Stop it with `start_comsol_server.bat stop`, or ask the assistant to run
 `comsol_stop_server`。版本、端口、模式都在 `config.toml` 里改。
 详见 **[docs/AI_SETUP_CN.md](docs/AI_SETUP_CN.md)**。
 
-Prefer the menu? `start_comsol_server.bat` with no arguments asks GUI or headless. / 想用菜单就直接双击，它只问 GUI 还是无头。
+Prefer the menu? `start_comsol_server.bat` with no arguments lists every action — start (GUI or headless), stop, restart, port, version, and upgrade. To move an existing checkout forward, run `start_comsol_server.bat upgrade`: it fast-forwards from GitHub, and stops rather than overwrite local work. / 想用菜单就直接双击，菜单里是全部动作：启停、重启、改端口 / 版本、升级；升级也可以直接跑 `start_comsol_server.bat upgrade`。
 
 ---
 

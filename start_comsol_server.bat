@@ -13,10 +13,12 @@ REM    start_comsol_server.bat gui        server + COMSOL Desktop
 REM    start_comsol_server.bat restart    stop, then start per config.toml
 REM    start_comsol_server.bat stop       shut the server down
 REM    start_comsol_server.bat status     report server and port
+REM    start_comsol_server.bat upgrade    pull the latest version from GitHub
 REM
 REM  Port, COMSOL version, mode and spinner live in config.toml; menu items
-REM  5 and 6 write to it. The first run creates .venv and installs the
-REM  dependencies (once, 3-5 minutes).
+REM  5 and 6 write to it, and item 7 pulls the latest version from GitHub.
+REM  The first run creates .venv and installs the dependencies (once, 3-5
+REM  minutes).
 REM
 REM  NOTE: this file is GBK-encoded on purpose. cmd.exe re-reads a batch file by
 REM  byte offset, so a UTF-8 file (or a mid-file chcp) desynchronises its parser.
@@ -51,6 +53,7 @@ if /I "%~1"=="gui"      goto gui
 if /I "%~1"=="restart"  goto restart
 if /I "%~1"=="status"   goto status
 if /I "%~1"=="stop"     goto stop
+if /I "%~1"=="upgrade"  goto upgrade
 if /I "%~1"=="/?"       goto usage
 if /I "%~1"=="-h"       goto usage
 if /I "%~1"=="--help"   goto usage
@@ -72,6 +75,7 @@ if "%PICK%"=="3" goto stop
 if "%PICK%"=="4" goto restart
 if "%PICK%"=="5" goto setport
 if "%PICK%"=="6" goto setversion
+if "%PICK%"=="7" goto upgrade
 goto menu
 
 :headless
@@ -103,6 +107,10 @@ goto done
 
 :setversion
 "%PY%" "%SCRIPTS%\set_version.py"
+goto done
+
+:upgrade
+"%PY%" "%SCRIPTS%\upgrade.py"
 goto done
 
 :done
@@ -190,6 +198,7 @@ echo      start_comsol_server.bat gui        server + COMSOL Desktop
 echo      start_comsol_server.bat restart    stop, then start per config.toml
 echo      start_comsol_server.bat status     report server and port
 echo      start_comsol_server.bat stop       shut the server down
+echo      start_comsol_server.bat upgrade    pull the latest version from GitHub
 echo.
 echo    配置在 config.toml（端口 / 版本 / 模式 / 动画；菜单 5、6 可直接改）。
 echo.
