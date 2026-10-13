@@ -4,6 +4,8 @@ start_comsol_server.bat runs this and dispatches on the exit code, so the menu
 can use the same colours, bold labels and column alignment as the rest of
 COMSOLPilot - cmd's plain ``echo`` cannot do any of that.
 
+It also puts a waiting update above the items, via upgrade.update_status().
+
 Exit code: 0 quit | 1 headless | 2 gui | 3 stop | 4 restart
            5 port | 6 version | 7 upgrade | 255 redraw (bad choice / no input)
 """
@@ -18,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import banner  # noqa: E402  (scripts/ is on sys.path)
+import upgrade  # noqa: E402
 from src import config  # noqa: E402
 
 BOLD = "\x1b[1m"
@@ -85,22 +88,40 @@ def _info_line() -> str:
     return "  " + "    ".join(parts)
 
 
+def _update_line(status: dict) -> str:
+    """The "newer version is waiting" notice, or nothing when there is none.
+
+    upgrade.update_status() is cached, so this costs the network at most once
+    per cache lifetime despite the menu redrawing after every action.
+    """
+    behind = int(status.get("behind") or 0)
+    if status.get("state") != "behind" or behind <= 0:
+        return ""
+    return "  %s%s↑ 有新版本可用%s  落后 %d 个提交，菜单 [7] 可升级" % (
+        BOLD, YELLOW, RESET, behind)
+
+
 def _item(key: str, label: str, description: str, bright: bool) -> str:
     number = "%s[%s]%s" % (BOLD if bright else "", key, RESET)
     pad = " " * max(1, LABEL_COLUMN - _cells(label))
     return ("  %s  %s%s%s" % (number, label, pad, description)).rstrip()
 
 
-def draw(colour: bool) -> None:
+def draw(colour: bool, status: dict) -> None:
+    notice = _update_line(status)
     if colour:
         print(CYAN + banner.text() + RESET)
         print()
         print(_info_line())
+        if notice:
+            print(notice)
         print()
     else:
         print(banner.text())
         print()
         print(_info_line().replace(BOLD, "").replace(RESET, ""))
+        if notice:
+            print(notice.replace(BOLD, "").replace(YELLOW, "").replace(RESET, ""))
         print()
     for key, label, description in ITEMS:
         line = _item(key, label, description, colour)
@@ -113,12 +134,15 @@ def draw(colour: bool) -> None:
 
 
 def main() -> int:
+    # Checked before the screen is cleared, so a slow (or offline) refresh never
+    # leaves the user staring at a blank console.
+    status = upgrade.update_status()
     try:
         os.system("cls" if os.name == "nt" else "clear")
     except Exception:
         pass
     colour = _setup_output()
-    draw(colour)
+    draw(colour, status)
 
     try:
         answer = input("  " + (YELLOW if colour else "") + "选择: "
