@@ -1,0 +1,34 @@
+# COMSOLPilot 配置文件
+#
+# 由 MCP 连接器、启动脚本 start_comsol_server.bat 与命令行共同读取。
+# 优先级：环境变量 > 本文件 > workspace/settings.json
+
+[comsol]
+# 服务端端口
+port = 2036
+# 服务端主机。本机 GUI 同步使用 localhost
+host = "localhost"
+# 会话模式：gui | headless
+mode = "gui"
+# 指定 COMSOL 版本，例如 "6.2"；留空表示使用最新安装版本
+version = ""
+# 服务端鉴权模式：auto | never | info | force
+login_mode = "auto"
+# gui 模式下同时打开 COMSOL Desktop
+open_desktop = true
+
+[connector]
+# 连接器启动时若无服务端监听，是否自行启动
+autostart = false
+# 连接器启动时若已有服务端监听，是否直接连接
+prewarm = true
+# 等待服务端就绪的超时秒数
+prewarm_wait = 20
+# 注册到 MCP 客户端时使用的条目名；同时安装多份时用于区分
+entry_name = "comsolpilot"
+
+[ui]
+# AI 创建或重命名的表格统一使用的标签；留空表示不改名
+table_label = ""
+# 启动/停止时的进度动画：claude | plain | auto | off
+spinner = "claude"

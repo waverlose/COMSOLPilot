@@ -1,0 +1,57 @@
+[project]
+name = "comsolpilot"
+version = "0.3.0"
+description = "MCP server that lets an AI drive COMSOL Multiphysics - geometry, physics, mesh, solve and results, live in COMSOL Desktop"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "waverlose" }]
+keywords = ["comsol", "mcp", "model-context-protocol", "simulation", "finite-element", "automation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "mcp>=1.0.0,<2",
+    "mph>=1.3.0",
+    "pydantic>=2.0.0",
+    "pypdf>=5.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.scripts]
+comsolpilot = "src.server:main"
+comsol-mcp = "src.server:main"
+
+[project.urls]
+Homepage = "https://github.com/waverlose/COMSOLPilot"
+Repository = "https://github.com/waverlose/COMSOLPilot"
+Issues = "https://github.com/waverlose/COMSOLPilot/issues"
+Changelog = "https://github.com/waverlose/COMSOLPilot/commits/main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+# Without this, pytest walks the whole project and picks up scratch scripts
+# under workspace/ that happen to match the *_test.py pattern - importing one
+# can start a COMSOL JVM and break every test that assumes a pristine process.
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]

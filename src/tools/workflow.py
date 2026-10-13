@@ -1,0 +1,1623 @@
+"""Structured Java-API workflow tools for COMSOLPilot.
+
+AI-facing rule:
+1. AI translates user intent into a structured spec.
+2. MCP validates the spec.
+3. MCP executes a fixed Java API workflow.
+
+This file is intentionally plain: capability registry, validator, executor, tools.
+The main path avoids localized COMSOL labels and uses Java tags.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from typing import Any
+
+from mcp.server.fastmcp import Context, FastMCP
+
+from .physics import PHYSICS_TYPE_MAP
+from .session import session_manager
+
+
+def _norm(value: str) -> str:
+    return value.replace(" ", "").replace("_", "").replace("-", "").lower()
+
+
+_NUMBER_RE = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
+
+
+def _leading_number(value: Any) -> float | None:
+    """Pull the numeric part out of a COMSOL value string such as '373.15[K]'."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    match = _NUMBER_RE.match(value.strip())
+    if match is None:
+        return None
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
+
+
+@dataclass(frozen=True)
+class PhysicsCapability:
+    tag: str
+    interface: str
+    label: str
+    aliases: tuple[str, ...]
+    boundary_conditions: dict[str, dict[str, Any]]
+
+
+GEOMETRY_CAPABILITIES: dict[str, dict[str, Any]] = {
+    # --- primitives ---------------------------------------------------------
+    "block": {"comsol_type": "Block", "required": ["tag", "position", "size"], "dims": (2, 3)},
+    "cylinder": {"comsol_type": "Cylinder", "required": ["tag", "position", "radius", "height"], "dims": (3,)},
+    "sphere": {"comsol_type": "Sphere", "required": ["tag", "position", "radius"], "dims": (3,)},
+    "rectangle": {"comsol_type": "Rectangle", "required": ["tag", "position", "size"], "dims": (2,)},
+    "circle": {"comsol_type": "Circle", "required": ["tag", "position", "radius"], "dims": (2,)},
+    # --- operations ---------------------------------------------------------
+    # input/subtract take geometry tags; array instances a feature N times;
+    # fillet/convert are 3D-only. "move" needs displacement or target_center.
+    "array": {"comsol_type": "Array", "required": ["tag", "input"], "dims": (2, 3)},
+    "difference": {"comsol_type": "Difference", "required": ["tag", "input", "subtract"], "dims": (2, 3)},
+    "union": {"comsol_type": "Union", "required": ["tag", "input"], "dims": (2, 3)},
+    "fillet": {"comsol_type": "Fillet3D", "required": ["tag", "radius"], "dims": (3,)},
+    "chamfer": {"comsol_type": "Chamfer3D", "required": ["tag"], "dims": (3,)},
+    "move": {"comsol_type": "Move", "required": ["tag"], "dims": (2, 3)},
+}
+
+PHYSICS_CAPABILITIES: dict[str, PhysicsCapability] = {
+    "ht": PhysicsCapability(
+        tag="ht",
+        interface="HeatTransfer",
+        label="Heat Transfer in Solids",
+        aliases=("HeatTransfer", "Heat Transfer", "Heat Transfer in Solids", "ht"),
+        boundary_conditions={
+            "TemperatureBoundary": {"feature": "TemperatureBoundary", "property_examples": {"T0": "293.15[K]"}},
+            "Temperature": {"feature": "TemperatureBoundary", "property_examples": {"T0": "293.15[K]"}},
+            "HeatFluxBoundary": {"feature": "HeatFluxBoundary", "property_examples": {"q0": "1e6[W/m^2]"}},
+            "HeatFlux": {"feature": "HeatFluxBoundary", "property_examples": {"q0": "1e6[W/m^2]"}},
+            "ConvectiveHeatFlux": {
+                "feature": "HeatFluxBoundary",
+                "default_properties": {"HeatFluxType": "ConvectiveHeatFlux"},
+                "property_examples": {"h": "10[W/(m^2*K)]", "Text": "293.15[K]"},
+            },
+            "ThermalInsulation": {"feature": "ThermalInsulation", "property_examples": {}},
+            "Symmetry": {"feature": "Symmetry", "property_examples": {}},
+        },
+    ),
+    "solid": PhysicsCapability(
+        tag="solid",
+        interface="SolidMechanics",
+        label="Solid Mechanics",
+        aliases=("SolidMechanics", "Solid Mechanics", "solid"),
+        boundary_conditions={
+            "Fixed": {"feature": "Fixed", "property_examples": {}},
+            "Roller": {"feature": "Roller", "property_examples": {}},
+            "Symmetry": {"feature": "Symmetry", "property_examples": {}},
+            "BoundaryLoad": {"feature": "BoundaryLoad", "property_examples": {"FperArea": ["0", "0", "-1e6[Pa]"]}},
+        },
+    ),
+    "es": PhysicsCapability(
+        tag="es",
+        interface="Electrostatics",
+        label="Electrostatics",
+        aliases=("Electrostatics", "es"),
+        boundary_conditions={
+            "Ground": {"feature": "Ground", "property_examples": {}},
+            "ElectricPotential": {"feature": "ElectricPotential", "property_examples": {"V0": "5[V]"}},
+            "SurfaceChargeDensity": {"feature": "SurfaceChargeDensity", "property_examples": {"rhoqs": "1e-6[C/m^2]"}},
+            "ZeroCharge": {"feature": "ZeroCharge", "property_examples": {}},
+        },
+    ),
+    "ec": PhysicsCapability(
+        tag="ec",
+        interface="ElectricCurrents",
+        label="Electric Currents",
+        aliases=("ElectricCurrents", "Electric Currents", "ec"),
+        boundary_conditions={
+            "Ground": {"feature": "Ground", "property_examples": {}},
+            "ElectricPotential": {"feature": "ElectricPotential", "property_examples": {"V0": "5[V]"}},
+            "ElectricInsulation": {"feature": "ElectricInsulation", "property_examples": {}},
+        },
+    ),
+    "spf": PhysicsCapability(
+        tag="spf",
+        interface="LaminarFlow",
+        label="Laminar Flow",
+        aliases=("LaminarFlow", "Laminar Flow", "spf"),
+        boundary_conditions={
+            "InletBoundary": {"feature": "InletBoundary", "property_examples": {"U0in": "0.01[m/s]"}},
+            "OutletBoundary": {"feature": "OutletBoundary", "property_examples": {"p0": "0[Pa]"}},
+            "Wall": {"feature": "Wall", "property_examples": {}},
+            "Symmetry": {"feature": "Symmetry", "property_examples": {}},
+        },
+    ),
+}
+
+PHYSICS_ALIAS_TO_TAG = {
+    _norm(alias): capability.tag
+    for capability in PHYSICS_CAPABILITIES.values()
+    for alias in capability.aliases
+}
+
+STUDY_CAPABILITIES = {
+    # comsol_type is the real kernel step name. The old code passed the MCP
+    # alias straight to feature().create(), which fails for Transient/Frequency
+    # ("Operation cannot be created in this context").
+    "Stationary": {"default_step": "stat", "comsol_type": "Stationary"},
+    "TimeDependent": {"default_step": "time", "comsol_type": "Transient"},
+    "FrequencyDomain": {"default_step": "freq", "comsol_type": "Frequency"},
+    "Eigenfrequency": {"default_step": "eig", "comsol_type": "Eigenfrequency"},
+}
+
+OUTPUT_CAPABILITIES = {"summary", "field", "max", "min", "global", "point"}
+
+
+def _as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _capabilities_payload() -> dict[str, Any]:
+    from .physics import PHYSICS_TYPE_MAP
+
+    addable_tags = {entry[0] for entry in PHYSICS_TYPE_MAP.values()}
+    return {
+        "spec_schema": {
+            "model": "Object: name, dimension=2|3, component='comp1', geometry='geom1'",
+            "geometry": "Array of features, applied in order: block, cylinder, sphere, rectangle, circle, array, difference, union, fillet, chamfer, move. Coordinates and sizes are SI meters.",
+            "union": "Optional boolean or object {tag, inputs}.",
+            "materials": "Array of {tag, label, properties, domains}. properties use COMSOL keys.",
+            "domains": ("Where a material or interface applies: 'all', a domain id list, "
+                        'a named selection tag, or {"box": {...}} to pick by coordinates. '
+                        "Prefer the box form on a merged geometry - after union COMSOL "
+                        "numbers the domains itself, so hard-coded ids are fragile."),
+            "physics": "Array of {type, domains, fluid_domains, boundary_conditions}. type may be an alias (ht, htf for conjugate heat transfer, spf, tds, mf, es, ec, solid) or a kernel tag. For htf pass fluid_domains so the interface knows which domains carry the flow.",
+            "multiphysics": "Array of {type, tag}. Couplings: nitf (non-isothermal flow, required for conjugate heat transfer), thermal_stress, fsi, joule_heating.",
+            "boundary_conditions": "Array of {tag, type, where, properties}.",
+            "where": ("Where the boundary condition applies. Prefer a SYMBOLIC FACE - it "
+                      "needs no coordinates and cannot be got wrong: "
+                      '{"face": "zmin"|"zmax"|"xmin"|"xmax"|"ymin"|"ymax"} selects the one '
+                      'extreme face of the geometry, {"faces": ["zmin","zmax"]} selects '
+                      'several, {"normal": "+z"} is an alias for the face whose outward '
+                      'normal points that way, and {"outer": true} selects every face on '
+                      'the geometry\'s bounding box (the whole exterior of a convex solid). '
+                      'Use {"box": {...}} only for a partial patch that is not a whole face, '
+                      'or {"boundaries": [ids]} when the face numbers are already known.'),
+            "where.examples": [
+                {"face": "zmin"},
+                {"faces": ["zmin", "zmax"]},
+                {"normal": "+z"},
+                {"outer": True},
+                {"box": {"xmin": 0, "xmax": 0.005, "ymin": 0, "ymax": 0.01,
+                         "zmin": 0.0999, "zmax": 0.1001}},
+            ],
+            "where.box": "xmin/xmax/ymin/ymax/zmin/zmax in meters, optional condition. Only for a patch narrower than a face.",
+            "mesh": "Object: tag='mesh1', size=1..9, run=true.",
+            "study": "Object: tag='std1', type='Stationary'|'TimeDependent'|'FrequencyDomain'|'Eigenfrequency', step_tag/tlist optional. tlist only for TimeDependent, e.g. 'range(0,0.1[s],1[s])' (COMSOL range order is start, step, stop).",
+            "outputs": "Array of {name, type, expression, unit, raw=false}.",
+        },
+        "geometry": GEOMETRY_CAPABILITIES,
+        "geometry_notes": {
+            "order": "features are applied in array order; operations reference earlier tags",
+            "array": "input=[tag], count=N, displacement=[dx,dy,dz]",
+            "difference": "input=[tag], subtract=[tags]",
+            "union": "input=[tags], keep_interior=true keeps solid|fluid boundaries",
+            "fillet": "radius, edges=[numbers] or edge_box={xmin..zmax}; default = all edges",
+            "move": "displacement=[dx,dy,dz] or target_center=[x,y,z]",
+            "properties": "any feature accepts properties={name: value} as an escape hatch",
+            "box_condition": "inside only matches fully contained entities; use intersects for touching ones",
+            "conjugate_heat_transfer": (
+                "Keep the fluid volumes as separate solids and merge everything with "
+                "union (intbnd=true). Do NOT cut the channels out with difference: a "
+                "difference leaves open pockets that the union then swallows, so the "
+                "mesh ends up with 2 domains and no fluid domain to select. Verified on "
+                "6.2: difference -> 2 domains; union(substrate, channels..., cover) -> 6 "
+                "domains incl. 4 channel domains."),
+            "solid_fluid_selection": (
+                "After such a union, select the fluid domains with "
+                "geometry_select_domains_by_box (the channels are thin slabs, so a box "
+                "with a small pad finds them) and assign water to that selection."),
+        },
+        "physics": _physics_payload(addable_tags),
+        "studies": STUDY_CAPABILITIES,
+        "outputs": sorted(OUTPUT_CAPABILITIES),
+    }
+
+
+def _resolve_physics(value: Any):
+    """(kernel_tag, client_type, label, capability) for a physics type name.
+
+    Curated interfaces come with a boundary-condition table; anything else that
+    PHYSICS_TYPE_MAP knows (htf, tds, mf, ...) resolves to its kernel type so it
+    can still be created, reusing the curated table when the kernel tag matches
+    (htf is the ht interface in its solids-and-fluids flavour).
+    """
+    key = _norm(str(value))
+    kernel_tag = PHYSICS_ALIAS_TO_TAG.get(key)
+    if kernel_tag:
+        capability = PHYSICS_CAPABILITIES[kernel_tag]
+        return kernel_tag, capability.interface, capability.label, capability
+    entry = PHYSICS_TYPE_MAP.get(key)
+    if entry:
+        kernel_tag, client_type, label = entry[0], entry[1], entry[2]
+        return kernel_tag, client_type, label, PHYSICS_CAPABILITIES.get(kernel_tag)
+    return None
+
+
+def _physics_payload(addable_tags: set) -> dict:
+    """Every physics interface the tools accept, with its type-name variants.
+
+    The curated entries (PHYSICS_CAPABILITIES) carry boundary-condition lists;
+    the rest of PHYSICS_TYPE_MAP is added so no supported interface is invisible
+    - notably 'htf' (conjugate heat transfer), which is the ht interface in its
+    solids-and-fluids flavour, and the standalone tds / mf interfaces.
+    """
+    variants: dict[str, list] = {}
+    for alias, entry in PHYSICS_TYPE_MAP.items():
+        kernel_tag, client_type, label = entry[0], entry[1], entry[2]
+        variants.setdefault(kernel_tag, []).append(
+            {"alias": alias, "type": client_type, "label": label})
+
+    payload: dict[str, Any] = {}
+    for tag, cap in PHYSICS_CAPABILITIES.items():
+        item = {
+            "interface": cap.interface,
+            "label": cap.label,
+            "aliases": list(cap.aliases),
+            "addable": tag in addable_tags,
+            "boundary_conditions": cap.boundary_conditions,
+        }
+        if variants.get(tag):
+            # alias -> kernel type name, e.g. htf -> HeatTransferInSolidsAndFluids
+            item["variants"] = variants[tag]
+        payload[tag] = item
+
+    for kernel_tag, items in variants.items():
+        if kernel_tag in payload:
+            continue
+        payload[kernel_tag] = {
+            "interface": items[0]["type"],
+            "label": items[0]["label"],
+            "aliases": sorted({item["alias"] for item in items}),
+            "addable": kernel_tag in addable_tags,
+            "boundary_conditions": {},
+            "variants": items,
+            "note": ("addable, but without a curated boundary-condition list; use "
+                     "physics[].properties or physics_set_property for settings"),
+        }
+    return payload
+
+
+# The six axis extremes of a geometry's bounding box. Naming a face this way
+# ("zmin") is the single biggest reliability win in a spec: the assistant no
+# longer has to hand-write the six numbers of a bounding box, which is where
+# most "the boundary condition landed on nothing" failures come from.
+FACE_KEYS: tuple[str, ...] = ("xmin", "xmax", "ymin", "ymax", "zmin", "zmax")
+NORMAL_TO_FACE: dict[str, str] = {"+x": "xmax", "-x": "xmin",
+                                  "+y": "ymax", "-y": "ymin",
+                                  "+z": "zmax", "-z": "zmin"}
+
+
+class SpecValidator:
+    def __init__(self, spec: dict[str, Any]):
+        self.spec = spec
+        self.errors: list[str] = []
+        self.warnings: list[str] = []
+
+    def validate(self) -> dict[str, Any]:
+        if not isinstance(self.spec, dict):
+            return {"valid": False, "errors": ["spec must be an object."], "warnings": []}
+        self._model()
+        self._geometry()
+        self._union()
+        self._materials()
+        self._physics()
+        self._mesh()
+        self._study()
+        self._outputs()
+        return {"valid": not self.errors, "errors": self.errors, "warnings": self.warnings}
+
+    def _model(self) -> None:
+        model = self.spec.get("model", {})
+        if not isinstance(model, dict):
+            self.errors.append("model must be an object.")
+            return
+        if model.get("dimension", 3) not in (2, 3):
+            self.errors.append("model.dimension must be 2 or 3.")
+
+    def _geometry(self) -> None:
+        geometry = self.spec.get("geometry", [])
+        if not isinstance(geometry, list) or not geometry:
+            self.errors.append("geometry must be a non-empty array.")
+            return
+        tags: set[str] = set()
+        for index, feature in enumerate(geometry):
+            path = f"geometry[{index}]"
+            if not isinstance(feature, dict):
+                self.errors.append(f"{path} must be an object.")
+                continue
+            tag = feature.get("tag")
+            if not isinstance(tag, str):
+                self.errors.append(f"{path}.tag is required.")
+            elif tag in tags:
+                self.errors.append(f"{path}.tag duplicates an earlier geometry tag.")
+            else:
+                tags.add(tag)
+            feature_type = feature.get("type")
+            if feature_type not in GEOMETRY_CAPABILITIES:
+                self.errors.append(f"{path}.type must be one of {sorted(GEOMETRY_CAPABILITIES)}.")
+                continue
+            for key in GEOMETRY_CAPABILITIES[feature_type]["required"]:
+                if key not in feature:
+                    self.errors.append(f"{path}.{key} is required.")
+            dimension = self.spec.get("model", {}).get("dimension", 3)
+            allowed_dims = GEOMETRY_CAPABILITIES[feature_type]["dims"]
+            if dimension not in allowed_dims:
+                self.errors.append(
+                    f"{path}.type '{feature_type}' needs model.dimension in "
+                    f"{sorted(allowed_dims)}, but model.dimension is {dimension}.")
+            if feature_type == "block":
+                self._vector(feature, "position", 3, path)
+                self._vector(feature, "size", 3, path)
+            elif feature_type == "rectangle":
+                self._vector(feature, "position", 2, path)
+                self._vector(feature, "size", 2, path)
+            elif feature_type == "cylinder":
+                self._vector(feature, "position", 3, path)
+                self._number(feature, "radius", path)
+                self._number(feature, "height", path)
+            elif feature_type == "sphere":
+                self._vector(feature, "position", 3, path)
+                self._number(feature, "radius", path)
+            elif feature_type == "circle":
+                self._vector(feature, "position", 2, path)
+                self._number(feature, "radius", path)
+            elif feature_type in ("array",):
+                self._tag_list(feature, "input", path, minimum=1)
+                if feature.get("displacement") is not None:
+                    self._vector(feature, "displacement", 3, path)
+            elif feature_type == "difference":
+                self._tag_list(feature, "input", path, minimum=1)
+                self._tag_list(feature, "subtract", path, minimum=1)
+            elif feature_type == "union":
+                self._tag_list(feature, "input", path, minimum=1)
+            elif feature_type == "fillet":
+                self._number(feature, "radius", path)
+                if feature.get("edges") is None and feature.get("edge_box") is None:
+                    self.warnings.append(
+                        f"{path}: no edges given, so every edge of the geometry is filleted. "
+                        "Pass edges or edge_box to restrict it.")
+            elif feature_type == "chamfer":
+                if feature.get("distance") is None:
+                    self.errors.append(f"{path}.distance is required for a chamfer.")
+            elif feature_type == "move":
+                if feature.get("displacement") is None and feature.get("target_center") is None:
+                    self.warnings.append(
+                        f"{path}: no displacement given; the Move feature will do nothing.")
+
+    def _tag_list(self, feature: dict, key: str, path: str, minimum: int = 1) -> None:
+        """Validate a list of geometry tags (input / subtract / edges owners)."""
+        value = feature.get(key)
+        if value is None:
+            self.errors.append(f"{path}.{key} is required.")
+            return
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list) or len(value) < minimum:
+            self.errors.append(f"{path}.{key} must be an array of at least {minimum} geometry tag(s).")
+            return
+        if not all(isinstance(item, str) for item in value):
+            self.errors.append(f"{path}.{key} must contain only geometry tags (strings).")
+
+    def _union(self) -> None:
+        union = self.spec.get("union")
+        if union is None or isinstance(union, bool):
+            return
+        if not isinstance(union, dict):
+            self.errors.append("union must be a boolean or object.")
+            return
+        inputs = union.get("inputs")
+        if inputs is not None and (not isinstance(inputs, list) or not all(isinstance(item, str) for item in inputs)):
+            self.errors.append("union.inputs must be an array of geometry tags.")
+
+    def _materials(self) -> None:
+        materials = self.spec.get("materials", [])
+        if not isinstance(materials, list):
+            self.errors.append("materials must be an array.")
+            return
+        if not materials:
+            self.warnings.append("No materials specified.")
+        for index, material in enumerate(materials):
+            path = f"materials[{index}]"
+            if not isinstance(material, dict):
+                self.errors.append(f"{path} must be an object.")
+                continue
+            if not isinstance(material.get("tag"), str):
+                self.errors.append(f"{path}.tag is required.")
+            if not isinstance(material.get("properties", {}), dict):
+                self.errors.append(f"{path}.properties must be an object.")
+
+    def _physics(self) -> None:
+        physics_list = self.spec.get("physics", [])
+        if not isinstance(physics_list, list):
+            self.errors.append("physics must be an array.")
+            return
+        if not physics_list:
+            self.warnings.append("No physics interfaces specified.")
+        for index, physics in enumerate(physics_list):
+            path = f"physics[{index}]"
+            if not isinstance(physics, dict):
+                self.errors.append(f"{path} must be an object.")
+                continue
+            # Accept everything the executor can build, including the aliases
+            # that only live in PHYSICS_TYPE_MAP (htf = conjugate heat transfer).
+            resolved = _resolve_physics(physics.get("type"))
+            if resolved is None:
+                supported = sorted(set(PHYSICS_ALIAS_TO_TAG) | set(PHYSICS_TYPE_MAP))
+                self.errors.append(f"{path}.type must be one of {supported} aliases.")
+                continue
+            capability = resolved[3]
+            if capability is None:
+                self.warnings.append(
+                    f"{path}: '{physics.get('type')}' has no catalogued boundary "
+                    "conditions; set them with the physics tools or properties.")
+            for bc_index, bc in enumerate(_as_list(physics.get("boundary_conditions"))):
+                if capability is None:
+                    continue
+                self._boundary_condition(bc, capability, f"{path}.boundary_conditions[{bc_index}]")
+
+    def _mesh(self) -> None:
+        mesh = self.spec.get("mesh", {})
+        if not isinstance(mesh, dict):
+            self.errors.append("mesh must be an object.")
+            return
+        size = mesh.get("size")
+        if size is not None:
+            if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= 9:
+                self.errors.append(
+                    f"mesh.size must be an integer in 1..9 (COMSOL predefined sizes), got {size!r}.")
+
+    def _study(self) -> None:
+        study = self.spec.get("study", {"type": "Stationary"})
+        if not isinstance(study, dict):
+            self.errors.append("study must be an object.")
+            return
+        if study.get("type", "Stationary") not in STUDY_CAPABILITIES:
+            self.errors.append(f"study.type must be one of {sorted(STUDY_CAPABILITIES)}.")
+            return
+        tlist = study.get("tlist")
+        if tlist is not None:
+            comsol_type = STUDY_CAPABILITIES[study["type"]].get("comsol_type")
+            if comsol_type != "Transient":
+                self.errors.append("study.tlist is only valid when study.type is TimeDependent.")
+            elif not isinstance(tlist, str) or not tlist.strip():
+                self.errors.append("study.tlist must be a non-empty string, e.g. 'range(0,0.1[s],1[s])'.")
+
+    def _outputs(self) -> None:
+        outputs = self.spec.get("outputs", [])
+        if not isinstance(outputs, list):
+            self.errors.append("outputs must be an array.")
+            return
+        for index, output in enumerate(outputs):
+            path = f"outputs[{index}]"
+            if not isinstance(output, dict):
+                self.errors.append(f"{path} must be an object.")
+                continue
+            if output.get("type") not in OUTPUT_CAPABILITIES:
+                self.errors.append(f"{path}.type must be one of {sorted(OUTPUT_CAPABILITIES)}.")
+            if not isinstance(output.get("expression"), str):
+                self.errors.append(f"{path}.expression is required.")
+
+    def _boundary_condition(self, bc: Any, capability: PhysicsCapability, path: str) -> None:
+        if not isinstance(bc, dict):
+            self.errors.append(f"{path} must be an object.")
+            return
+        if bc.get("type") not in capability.boundary_conditions:
+            self.errors.append(f"{path}.type is not supported for physics {capability.tag}.")
+        where = bc.get("where")
+        if not isinstance(where, dict):
+            self.errors.append(f"{path}.where must be an object.")
+            return
+        if "box" in where:
+            box = where["box"]
+            if not isinstance(box, dict):
+                self.errors.append(f"{path}.where.box must be an object.")
+                return
+            for key in ("xmin", "xmax", "ymin", "ymax", "zmin", "zmax"):
+                if not isinstance(box.get(key), (int, float)):
+                    self.errors.append(f"{path}.where.box.{key} must be a number in meters.")
+        elif "selection" in where:
+            if not isinstance(where["selection"], str):
+                self.errors.append(f"{path}.where.selection must be a string tag.")
+        elif "boundaries" in where:
+            if not isinstance(where["boundaries"], list) or not all(isinstance(item, int) for item in where["boundaries"]):
+                self.errors.append(f"{path}.where.boundaries must be an array of integers.")
+        elif any(where.get(key) for key in ("face", "faces", "normal", "outer")):
+            self._face_where(where, path)
+        else:
+            self.errors.append(
+                f"{path}.where must name a location: box, selection, boundaries, "
+                'face (e.g. "zmin"), faces, normal (e.g. "+z"), or outer.')
+        if not isinstance(bc.get("properties", {}), dict):
+            self.errors.append(f"{path}.properties must be an object.")
+
+    def _face_where(self, where: dict, path: str) -> None:
+        """Validate the symbolic face selectors accepted alongside box/selection."""
+        named = [where.get("face")] if where.get("face") else []
+        if where.get("faces") is not None:
+            if not isinstance(where["faces"], list):
+                self.errors.append(f"{path}.where.faces must be an array.")
+                return
+            named.extend(where["faces"])
+        for key in named:
+            if str(key).strip().lower() not in FACE_KEYS:
+                self.errors.append(
+                    f"{path}.where face {key!r} must be one of {list(FACE_KEYS)}.")
+        if where.get("normal") is not None:
+            normal = str(where["normal"]).replace(" ", "").lower()
+            if normal not in NORMAL_TO_FACE:
+                self.errors.append(
+                    f'{path}.where.normal must look like "+z" or "-x" '
+                    f"(one of {sorted(NORMAL_TO_FACE)}).")
+        if where.get("outer") is not None and not isinstance(where["outer"], bool):
+            self.errors.append(f"{path}.where.outer must be true or false.")
+
+    def _physics_tag(self, value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        return PHYSICS_ALIAS_TO_TAG.get(_norm(value))
+
+    def _vector(self, item: dict, key: str, length: int, path: str) -> None:
+        value = item.get(key)
+        if not isinstance(value, list) or len(value) != length or not all(isinstance(v, (int, float)) for v in value):
+            self.errors.append(f"{path}.{key} must be an array of {length} numbers in meters.")
+
+    def _number(self, item: dict, key: str, path: str) -> None:
+        if not isinstance(item.get(key), (int, float)):
+            self.errors.append(f"{path}.{key} must be a number in meters.")
+
+
+class JavaWorkflowExecutor:
+    # Ordered stage names, used for progress reporting. Keep in sync with run().
+    STAGES: tuple[str, ...] = (
+        "model", "geometry", "materials", "physics", "multiphysics",
+        "mesh", "study", "solve", "outputs",
+    )
+
+    def __init__(self, spec: dict[str, Any], solve: bool, collect_outputs: bool,
+                 progress: Any = None):
+        self.spec = spec
+        self.solve = solve
+        self.collect_outputs = collect_outputs
+        self.progress = progress
+        self.log: list[dict[str, Any]] = []
+        self.model = None
+        self.model_name: str | None = None
+        self.component = None
+        self.geometry = None
+
+    def _report(self, stage: str) -> None:
+        """Push a progress notification; never let it break the workflow.
+
+        The MCP client may not support notifications/progress, and the callback
+        may also run outside a request context. Both are expected, not errors.
+        """
+        if self.progress is None:
+            return
+        try:
+            index = self.STAGES.index(stage) + 1
+        except ValueError:
+            index = len(self.STAGES)
+        try:
+            self.progress(index, len(self.STAGES), f"COMSOLPilot: {stage}")
+        except Exception:
+            pass
+
+    def run(self) -> dict[str, Any]:
+        if not session_manager.is_connected:
+            return {"success": False, "stage": "session",
+                    "error": ("No active COMSOL session. Ask the user to start COMSOL "
+                              "(start_comsol_server.bat) or call comsol_start_server, "
+                              "then reconnect the connector once so it attaches.")}
+        try:
+            self._create_model()
+            self._report("model")
+            self._bootstrap()
+            self._geometry_features()
+            self._report("geometry")
+            self._materials()
+            self._report("materials")
+            self._physics()
+            self._report("physics")
+            self._multiphysics()
+            self._report("multiphysics")
+            self._mesh()
+            self._report("mesh")
+            study_tag = self._study()
+            self._report("study")
+            solved, solve_error = self._solve(study_tag)
+            self._report("solve")
+            outputs = self._outputs(solved)
+            self._report("outputs")
+            return {
+                "success": solve_error is None,
+                "model": self.model_name,
+                "log": self.log,
+                "solved": solved,
+                "solve_error": solve_error,
+                "outputs": outputs,
+            }
+        except Exception as exc:
+            return {"success": False, "stage": "execute", "error": str(exc), "log": self.log}
+
+    def _create_model(self) -> None:
+        client = session_manager.client
+        if client is None:
+            raise RuntimeError("Client not available.")
+        name = self.spec.get("model", {}).get("name")
+        self.model = session_manager.retry_comsol_busy(lambda: client.create(name))
+        self.model_name = session_manager.add_model(self.model)
+        session_manager.set_current_model(self.model_name)
+        self.log.append({"step": "model_create", "model": self.model_name})
+
+    def _bootstrap(self) -> None:
+        model_spec = self.spec.get("model", {})
+        component_tag = model_spec.get("component", "comp1")
+        geometry_tag = model_spec.get("geometry", "geom1")
+        dimension = int(model_spec.get("dimension", 3))
+        jm = self.model.java
+        components = {comp.tag(): comp for comp in jm.component()}
+        self.component = components.get(component_tag) or session_manager.retry_comsol_busy(
+            lambda: jm.component().create(component_tag, True)
+        )
+        geometries = {geom.tag(): geom for geom in self.component.geom()}
+        self.geometry = geometries.get(geometry_tag) or session_manager.retry_comsol_busy(
+            lambda: self.component.geom().create(geometry_tag, dimension)
+        )
+        self.log.append({"step": "bootstrap", "component": self.component.tag(), "geometry": self.geometry.tag()})
+
+    def _geometry_features(self) -> None:
+        # Imported here so the module keeps importing without a JVM present.
+        from jpype import JArray, JDouble, JInt
+
+        for feature in self.spec.get("geometry", []):
+            feature_type = feature["type"]
+            existing = {node.tag(): node for node in self.geometry.feature()}
+            node = existing.get(feature["tag"]) or session_manager.retry_comsol_busy(
+                lambda: self.geometry.feature().create(feature["tag"], GEOMETRY_CAPABILITIES[feature_type]["comsol_type"])
+            )
+            if feature_type in ("block", "rectangle"):
+                node.set("pos", [str(v) for v in feature["position"]])
+                node.set("size", [str(v) for v in feature["size"]])
+            elif feature_type == "cylinder":
+                node.set("pos", [str(v) for v in feature["position"]])
+                node.set("r", str(feature["radius"]))
+                node.set("h", str(feature["height"]))
+            elif feature_type == "sphere":
+                node.set("pos", [str(v) for v in feature["position"]])
+                node.set("r", str(feature["radius"]))
+            elif feature_type == "circle":
+                node.set("pos", [str(v) for v in feature["position"]])
+                node.set("r", str(feature["radius"]))
+            elif feature_type == "array":
+                node.selection("input").set([str(t) for t in feature["input"]])
+                node.set("type", str(feature.get("type_of_array") or "linear"))
+                # size must be a JInt: set(int) is ambiguous over JPype and fails.
+                node.set("size", JInt(int(feature.get("count") or feature.get("size") or 2)))
+                if feature.get("displacement"):
+                    node.set("displ", JArray(JDouble)([float(v) for v in feature["displacement"]]))
+            elif feature_type == "difference":
+                node.selection("input").set([str(t) for t in feature["input"]])
+                # The subtract list lives in the selection named "input2" on the
+                # 6.2 kernel ("subtract" does not exist).
+                node.selection("input2").set([str(t) for t in feature["subtract"]])
+            elif feature_type == "union":
+                node.selection("input").set([str(t) for t in feature["input"]])
+                if feature.get("keep_interior"):
+                    # Keeps the internal solid|fluid boundaries - required for
+                    # conjugate heat transfer between two domains.
+                    node.set("intbnd", True)
+            elif feature_type == "fillet":
+                # Edge numbers can only be read once the geometry exists, so
+                # build up to this point before touching the edge selection.
+                session_manager.retry_comsol_busy(lambda: self.geometry.run())
+                edges = feature.get("edges")
+                used_box = None
+                if edges is None:
+                    box = feature.get("edge_box")
+                    if box is None:
+                        # Default: every edge of the geometry.
+                        box = {"xmin": -1.0, "xmax": 1.0, "ymin": -1.0, "ymax": 1.0,
+                               "zmin": -1.0, "zmax": 1.0}
+                    edges, used_box = self._edges_in_box(box)
+                if not edges:
+                    # Leaving an empty Fillet3D in the sequence would fail the
+                    # final build; drop it and report instead.
+                    try:
+                        self.geometry.feature().remove(feature["tag"])
+                    except Exception:
+                        pass
+                    self.log.append({"step": "geometry_fillet_skipped", "tag": feature["tag"],
+                                     "reason": "no edges matched the given box; feature removed",
+                                     "box": used_box})
+                    continue
+                source = feature.get("from") or self._last_geometry_tag(feature["tag"])
+                node.selection("edge").set(str(source), JArray(JInt)([int(e) for e in edges]))
+                node.set("radius", str(feature["radius"]))
+                if used_box:
+                    self.log.append({"step": "geometry_fillet_edges", "tag": feature["tag"],
+                                     "count": len(edges), "box": used_box})
+            elif feature_type == "chamfer":
+                session_manager.retry_comsol_busy(lambda: self.geometry.run())
+                edges = feature.get("edges")
+                if edges is None:
+                    box = feature.get("edge_box") or {"xmin": -1.0, "xmax": 1.0, "ymin": -1.0,
+                                                      "ymax": 1.0, "zmin": -1.0, "zmax": 1.0}
+                    edges, _ = self._edges_in_box(box)
+                source = feature.get("from") or self._last_geometry_tag(feature["tag"])
+                node.selection("edge").set(str(source), JArray(JInt)([int(e) for e in edges]))
+                if feature.get("distance") is not None:
+                    node.set("dist", str(feature["distance"]))
+            elif feature_type == "move":
+                node.selection("input").all()
+                displacement = feature.get("displacement")
+                if displacement is None and feature.get("target_center"):
+                    # Measure the geometry and shift its bounding-box centre to
+                    # the requested point (the same thing geometry_center does).
+                    session_manager.retry_comsol_busy(lambda: self.geometry.run())
+                    try:
+                        # Reuse the geometry stage's parser: getBoundingBox() is
+                        # plain 6 doubles whose layout has to be inferred, and
+                        # indexing them as [min,min,min,max,max,max] silently
+                        # produced a wrong centre (the "Move did nothing" report).
+                        from .geometry import _bbox_center
+
+                        centre = _bbox_center(self.geometry)
+                        if centre is None:
+                            raise RuntimeError("exploded bounding box could not be read")
+                        displacement = [float(feature["target_center"][i]) - centre[i]
+                                        for i in range(3)]
+                        self.log.append({"step": "geometry_move_measured",
+                                         "centre_before": centre, "displacement": displacement})
+                    except Exception as exc:  # noqa: BLE001
+                        self.log.append({"step": "geometry_move_measure_failed",
+                                         "error": str(exc)[:140]})
+                if displacement:
+                    node.set("displ", JArray(JDouble)([float(v) for v in displacement]))
+            # Generic escape hatch: any property COMSOL accepts, set verbatim.
+            for key, value in (feature.get("properties") or {}).items():
+                try:
+                    node.set(str(key), value)
+                except Exception as exc:  # noqa: BLE001 - reported, not fatal
+                    self.log.append({"step": "geometry_property_rejected", "tag": feature["tag"],
+                                     "property": key, "error": str(exc)[:120]})
+            self.log.append({"step": "geometry_add", "tag": feature["tag"], "type": feature_type})
+        self._union_if_requested()
+        try:
+            self.geometry.run()
+        except Exception as exc:  # noqa: BLE001 - translate the common kernel refusals
+            message = str(exc)
+            if "nonmanifold" in message or "非流形" in message:
+                raise RuntimeError(
+                    "Geometry build failed: the kernel refuses this operation on "
+                    "nonmanifold geometry. This typically happens when a fillet or "
+                    "chamfer is applied after a Union of face-touching parts. Fix by "
+                    "either (a) filleting each part before merging it, or (b) letting "
+                    "COMSOL repair the geometry first (geometry_add_feature with "
+                    "feature_type='Repair' or 'ConvertToSolid') and retrying. "
+                    "Original kernel message: " + message[:200]) from exc
+            raise
+        self.log.append({"step": "geometry_build", "geometry": self.geometry.tag()})
+
+    def _last_geometry_tag(self, exclude: str) -> str:
+        """Tag of the feature before *exclude* - the owner of the fillet edges."""
+        tags = [node.tag() for node in self.geometry.feature()]
+        before = [t for t in tags if t != exclude]
+        return before[-1] if before else "geom1"
+
+    def _edges_in_box(self, box: dict):
+        """Edge numbers inside a coordinate box, via a temporary Box selection.
+
+        Geometry sequences expose no edge listing on the client side, so the
+        numbers have to come from a selection; it is removed again immediately
+        so the model gains no extra node.
+        """
+        selection_tag = "wf_edge_box"
+        component = self.component
+        try:
+            for existing in list(component.selection()):
+                if existing.tag() == selection_tag:
+                    component.selection().remove(selection_tag)
+                    break
+        except Exception:
+            pass
+        sel = component.selection().create(selection_tag, "Box")
+        sel.geom(self.geometry.tag(), 1)
+        sel.set("entitydim", "1")
+        for key in ("xmin", "xmax", "ymin", "ymax", "zmin", "zmax"):
+            if key in box:
+                sel.set(key, str(box[key]))
+        sel.set("condition", str(box.get("condition") or "inside"))
+        try:
+            edges = [int(e) for e in sel.entities(1)]
+        except Exception:
+            edges = [int(e) for e in sel.entities()]
+        try:
+            component.selection().remove(selection_tag)
+        except Exception:
+            pass
+        return edges, dict(box)
+
+    def _union_if_requested(self) -> None:
+        union = self.spec.get("union")
+        if not union:
+            return
+        if isinstance(union, dict):
+            tag = union.get("tag", "uni1")
+            inputs = union.get("inputs") or [feature["tag"] for feature in self.spec.get("geometry", [])]
+        else:
+            tag = "uni1"
+            inputs = [feature["tag"] for feature in self.spec.get("geometry", [])]
+        existing = {node.tag(): node for node in self.geometry.feature()}
+        node = existing.get(tag) or session_manager.retry_comsol_busy(
+            lambda: self.geometry.feature().create(tag, "Union")
+        )
+        node.selection("input").set(inputs)
+        if isinstance(union, dict) and union.get("keep_interior"):
+            # Keep the interior boundaries between the merged domains.
+            node.set("intbnd", True)
+        self.log.append({"step": "geometry_union", "tag": tag, "inputs": inputs,
+                         "keep_interior": bool(isinstance(union, dict) and union.get("keep_interior"))})
+
+    def _materials(self) -> None:
+        for material_spec in self.spec.get("materials", []):
+            existing = {mat.tag(): mat for mat in self.component.material()}
+            material = existing.get(material_spec["tag"]) or session_manager.retry_comsol_busy(
+                lambda: self.component.material().create(material_spec["tag"], "Common")
+            )
+            if material_spec.get("label"):
+                material.label(material_spec["label"])
+            group = material.propertyGroup("def")
+            for key, value in material_spec.get("properties", {}).items():
+                group.set(str(key), value)
+            self._apply_domain_selection(material, material_spec.get("domains"),
+                                         f"{material_spec['tag']}_dom")
+            self.log.append({"step": "material", "tag": material.tag(),
+                             "label": material.label(),
+                             "domains": material_spec.get("domains", "all")})
+
+    def _physics(self) -> None:
+        for physics_spec in self.spec.get("physics", []):
+            resolved = _resolve_physics(physics_spec["type"])
+            if resolved is None:
+                raise RuntimeError(
+                    "Unknown physics interface '%s'. Supported: %s"
+                    % (physics_spec["type"], ", ".join(sorted(PHYSICS_CAPABILITIES))
+                       + " / aliases: " + ", ".join(sorted(
+                           key for key in PHYSICS_TYPE_MAP if key not in PHYSICS_ALIAS_TO_TAG))))
+            kernel_tag, client_type, label, capability = resolved
+            existing = {physics.tag(): physics for physics in self.component.physics()}
+            physics = existing.get(kernel_tag) or session_manager.retry_comsol_busy(
+                lambda: self.component.physics().create(kernel_tag, client_type, self.geometry.tag())
+            )
+            physics.label(label)
+            self.log.append({"step": "physics", "tag": physics.tag(), "type": client_type})
+
+            # Domain selection: an interface on a multi-domain geometry must be
+            # told which domains it owns, otherwise Laminar Flow can end up on
+            # the solid and the fluid variables never get solved.
+            domain_spec = physics_spec.get("domains")
+            selection_spec = physics_spec.get("selection")
+            chosen = selection_spec if selection_spec else domain_spec
+            if chosen:
+                applied = self._apply_domain_selection(physics, chosen,
+                                                       f"{physics.tag()}_dom")
+                self.log.append({"step": "physics_domains", "tag": physics.tag(),
+                                 "domains": applied})
+            elif capability is not None and capability.interface in ("LaminarFlow", "TurbulentFlow"):
+                self.log.append({"step": "physics_domains_warning", "tag": physics.tag(),
+                                 "reason": "no 'domains' given for a flow interface; "
+                                           "COMSOL's default selection may cover solid "
+                                           "domains too"})
+            # Conjugate heat transfer ships a fluid*and* a solid domain feature.
+            # On a merged geometry COMSOL puts every domain in "solid1" and
+            # leaves "fluid1" empty - measured on 6.2: solid1=[1,2], fluid1=[] -
+            # so the interface never receives the flow field and the temperature
+            # field comes back zero. Flag the fluid domains explicitly.
+            if client_type == "HeatTransferInSolidsAndFluids":
+                fluid_domains = physics_spec.get("fluid_domains")
+                if fluid_domains:
+                    try:
+                        applied = self._apply_domain_selection(
+                            physics.feature("fluid1"), fluid_domains,
+                            f"{physics.tag()}_fluid")
+                        self.log.append({"step": "physics_fluid_domains",
+                                         "tag": physics.tag(),
+                                         "domains": applied,
+                                         "note": "solid1 adjusts automatically"})
+                    except Exception as exc:  # noqa: BLE001
+                        self.log.append({"step": "physics_fluid_domains_failed",
+                                         "tag": physics.tag(),
+                                         "error": str(exc)[:140]})
+                else:
+                    self.log.append({
+                        "step": "physics_fluid_domains_warning", "tag": physics.tag(),
+                        "reason": "conjugate heat transfer without fluid_domains: "
+                                  "COMSOL defaults every domain to solid, so the "
+                                  "flow field is not fed into the heat equation"})
+
+            for index, bc_spec in enumerate(_as_list(physics_spec.get("boundary_conditions"))):
+                self._boundary_condition(physics, capability, bc_spec, index)
+
+    def _multiphysics(self) -> None:
+        """Create multiphysics couplings (e.g. nitf for conjugate heat transfer).
+
+        The coupling is what actually links the flow field to the heat equation;
+        without it a laminar-flow interface and a heat interface coexist but do
+        not exchange anything.
+        """
+        couplings = self.spec.get("multiphysics") or []
+        if not couplings:
+            return
+        aliases = {
+            "nitf": "NonIsothermalFlow",
+            "nonisothermalflow": "NonIsothermalFlow",
+            "nonisothermal": "NonIsothermalFlow",
+            "conjugateheattransfer": "NonIsothermalFlow",
+            "cht": "NonIsothermalFlow",
+            "thermalstress": "ThermalStress",
+            "ts": "ThermalStress",
+            "fluidstructureinteraction": "FluidStructureInteraction",
+            "fsi": "FluidStructureInteraction",
+            "jouleheating": "JouleHeating",
+            "jh": "JouleHeating",
+            "electromechanicalforces": "ElectromechanicalForces",
+        }
+        existing = {node.tag(): node for node in self.component.multiphysics()}
+        for index, coupling in enumerate(_as_list(couplings)):
+            requested = coupling.get("type") if isinstance(coupling, dict) else coupling
+            client_type = aliases.get(_norm(str(requested)), str(requested))
+            tag = (coupling.get("tag") if isinstance(coupling, dict) else None) or "mp%d" % (index + 1)
+            node = existing.get(tag) or session_manager.retry_comsol_busy(
+                lambda: self.component.multiphysics().create(tag, client_type, self.geometry.tag())
+            )
+            self.log.append({"step": "multiphysics", "tag": node.tag(),
+                             "type": client_type, "requested": str(requested)})
+
+    def _boundary_condition(self, physics, capability: PhysicsCapability, bc_spec: dict[str, Any], index: int) -> None:
+        if capability is None or bc_spec["type"] not in capability.boundary_conditions:
+            raise RuntimeError(
+                "Boundary condition '%s' is not catalogued for this interface. "
+                "Add it with the physics tools, or set the value with "
+                "physics_set_property in the feature's properties." % bc_spec["type"])
+        bc_capability = capability.boundary_conditions[bc_spec["type"]]
+        feature_type = bc_capability["feature"]
+        bc_tag = bc_spec.get("tag") or f"{physics.tag()}bc{index + 1}"
+        existing = {feature.tag(): feature for feature in physics.feature()}
+        bc = existing.get(bc_tag) or session_manager.retry_comsol_busy(
+            lambda: physics.create(bc_tag, feature_type)
+        )
+        self._apply_where(bc, physics.tag(), bc_spec.get("where", {}), index)
+        properties = {
+            **bc_capability.get("default_properties", {}),
+            **bc_spec.get("properties", {}),
+        }
+        for key, value in properties.items():
+            bc.set(str(key), value)
+        self.log.append({
+            "step": "boundary_condition",
+            "physics": physics.tag(),
+            "tag": bc_tag,
+            "type": feature_type,
+            "requested_type": bc_spec["type"],
+        })
+
+    def _apply_where(self, bc, physics_tag: str, where: dict[str, Any], index: int) -> None:
+        if "box" in where:
+            selection_tag = where.get("selection_name") or f"{physics_tag}_bsel_{index + 1}"
+            selection_tag = self._box_selection(selection_tag, where["box"])
+            bc.selection().named(selection_tag)
+        elif "selection" in where:
+            bc.selection().named(where["selection"])
+        elif "boundaries" in where:
+            bc.selection().set([int(boundary) for boundary in where["boundaries"]])
+        else:
+            keys = self._face_keys(where)
+            if keys:
+                selection_tag = where.get("selection_name") or f"{physics_tag}_fsel_{index + 1}"
+                bc.selection().named(self._face_selection(selection_tag, keys))
+
+    def _apply_domain_selection(self, owner, value: Any, tag_prefix: str) -> str:
+        """Point a material or physics interface at the domains in *value*.
+
+        Accepts "all", a named selection tag, a list of domain ids, or
+        {"box": {...}}. The box form exists because ``union`` lets COMSOL number
+        the domains, so a spec cannot hard-code them reliably - selecting by
+        coordinates is stable no matter how the union orders things.
+        """
+        if value in (None, "", "all"):
+            return "all"
+        if isinstance(value, str):
+            session_manager.retry_comsol_busy(lambda: owner.selection().named(value))
+            return value
+        if isinstance(value, dict) and "box" in value:
+            tag = str(value.get("selection_name") or tag_prefix)
+            tag = self._box_selection(tag, value["box"], dim=3)
+            session_manager.retry_comsol_busy(lambda: owner.selection().named(tag))
+            return tag
+        if isinstance(value, (list, tuple)):
+            ids = [int(item) for item in value]
+            session_manager.retry_comsol_busy(lambda: owner.selection().set(ids))
+            return ",".join(str(item) for item in ids)
+        raise ValueError(
+            'domains must be "all", a selection tag, a list of ids, or {"box": {...}}; '
+            f"got {value!r}")
+
+    def _face_keys(self, where: dict[str, Any]) -> list[str]:
+        """Resolve where.face / faces / normal / outer into axis extremes."""
+        keys: list[str] = []
+        if where.get("face"):
+            keys.append(str(where["face"]).strip().lower())
+        for item in where.get("faces") or []:
+            keys.append(str(item).strip().lower())
+        if where.get("normal"):
+            normal = str(where["normal"]).replace(" ", "").lower()
+            if normal not in NORMAL_TO_FACE:
+                raise ValueError(f"where.normal must be one of {sorted(NORMAL_TO_FACE)}.")
+            keys.append(NORMAL_TO_FACE[normal])
+        if where.get("outer"):
+            keys.extend(FACE_KEYS)
+        unknown = [key for key in keys if key not in FACE_KEYS]
+        if unknown:
+            raise ValueError(
+                f"where.face/faces: unknown face(s) {unknown}; use "
+                f"{list(FACE_KEYS)} or a normal such as '+z'.")
+        ordered: list[str] = []
+        for key in keys:
+            if key not in ordered:
+                ordered.append(key)
+        return ordered
+
+    def _geometry_bounds(self) -> dict[str, tuple[float, float]]:
+        """Bounding box of the geometry as {'x': (lo, hi), 'y': ..., 'z': ...}.
+
+        COMSOL returns (xmin, xmax, ymin, ymax, zmin, zmax) on the builds we have
+        seen and an interleaved order on others; accept whichever is monotonic,
+        the same way geometry_info does.
+        """
+        raw = [float(value) for value in self.geometry.getBoundingBox()]
+        if len(raw) == 6:
+            candidate = {"x": (raw[0], raw[1]), "y": (raw[2], raw[3]), "z": (raw[4], raw[5])}
+            if all(lo <= hi for lo, hi in candidate.values()):
+                return candidate
+            candidate = {"x": (raw[0], raw[3]), "y": (raw[1], raw[4]), "z": (raw[2], raw[5])}
+            if all(lo <= hi for lo, hi in candidate.values()):
+                return candidate
+        raise ValueError(
+            "Could not read the geometry bounding box, so faces cannot be named "
+            'symbolically. Use "where": {"box": ...} or {"boundaries": [...]} instead.')
+
+    def _box_for_face(self, key: str) -> dict[str, Any]:
+        """A zero-thickness box hugging the geometry's extreme face along one axis.
+
+        The empty axis is expanded by _box_selection's existing tolerance loop,
+        so the face is found even though a box drawn exactly on it matches
+        nothing at COMSOL's default tolerance.
+        """
+        bounds = self._geometry_bounds()
+        box: dict[str, Any] = {
+            "xmin": bounds["x"][0], "xmax": bounds["x"][1],
+            "ymin": bounds["y"][0], "ymax": bounds["y"][1],
+            "zmin": bounds["z"][0], "zmax": bounds["z"][1],
+        }
+        axis, side = key[0], key[1:]
+        value = bounds[axis][0 if side == "min" else 1]
+        box[f"{axis}min"] = value
+        box[f"{axis}max"] = value
+        return box
+
+    def _face_selection(self, tag: str, keys: list[str]) -> str:
+        """Create a named selection covering the requested extreme faces."""
+        if len(keys) == 1:
+            return self._box_selection(tag, self._box_for_face(keys[0]))
+        box_tags = [self._box_selection(f"{tag}_{key}", self._box_for_face(key))
+                    for key in keys]
+        existing = {selection.tag(): selection for selection in self.component.selection()}
+        union = existing.get(tag) or session_manager.retry_comsol_busy(
+            lambda: self.component.selection().create(tag, "Union"))
+        union.set("entitydim", "2")
+        union.set("input", box_tags)
+        self.log.append({"step": "selection_union", "tag": tag, "inputs": box_tags})
+        return tag
+
+    # COMSOL's Box "inside" test carries an absolute tolerance (measured ~1e-8 m
+    # on COMSOL 6.2): a box drawn exactly on a face matches nothing at all. The
+    # original code wrote the requested bounds verbatim, so a box such as
+    # z in [-1e-9, 1e-9] produced an empty selection -> the boundary condition
+    # covered zero faces -> the stationary system went singular, surfacing either
+    # as "not converged" or, worse, as a successful solve with wrong numbers.
+    # Expand the box outward in steps and keep the first non-empty match.
+    BOX_MARGINS: tuple[float, ...] = (0.0, 1e-8, 1e-6, 1e-4, 1e-3)
+
+    def _box_selection(self, tag: str, box: dict[str, Any], dim: int = 2) -> str:
+        """Create or reuse a Box selection; *dim* 2 selects boundaries, 3 domains."""
+        existing = {sel.tag(): sel for sel in self.component.selection()}
+        selection = existing.get(tag) or session_manager.retry_comsol_busy(
+            lambda: self.component.selection().create(tag, "Box")
+        )
+        selection.geom(self.geometry.tag(), dim)
+        selection.set("entitydim", str(dim))
+        selection.set("condition", box.get("condition", "inside"))
+
+        span = max(
+            abs(float(box["xmax"]) - float(box["xmin"])),
+            abs(float(box["ymax"]) - float(box["ymin"])),
+            abs(float(box["zmax"]) - float(box["zmin"])),
+        ) or 1.0
+        # Never grow the box by more than 1% of its own span, so a micro-scale
+        # model does not silently swallow neighbouring faces.
+        deltas: list[float] = []
+        for margin in self.BOX_MARGINS:
+            delta = min(margin, 0.01 * span)
+            if delta not in deltas:
+                deltas.append(delta)
+
+        def _bounds(delta: float) -> None:
+            for key, sign in (("xmin", -1.0), ("xmax", 1.0),
+                              ("ymin", -1.0), ("ymax", 1.0),
+                              ("zmin", -1.0), ("zmax", 1.0)):
+                selection.set(key, str(float(box[key]) + sign * delta))
+
+        requested_condition = str(box.get("condition", "inside"))
+        selected: list[int] = []
+        used_delta = 0.0
+        used_condition = requested_condition
+        for delta in deltas:
+            _bounds(delta)
+            selected = [int(item) for item in selection.entities()]
+            used_delta = delta
+            if selected:
+                break
+
+        # "inside" only matches faces that lie entirely within the box, so a
+        # small box on a large face (a local heat patch on a 20x10 mm base)
+        # matches nothing. Fall back to the weaker tests and report which one
+        # answered, instead of failing the whole build.
+        if not selected and requested_condition == "inside":
+            for fallback in ("allvertices", "intersects"):
+                selection.set("condition", fallback)
+                for delta in deltas:
+                    _bounds(delta)
+                    selected = [int(item) for item in selection.entities()]
+                    used_delta = delta
+                    if selected:
+                        break
+                if selected:
+                    used_condition = fallback
+                    break
+
+        if not selected:
+            bounds = {k: box[k] for k in ("xmin", "xmax", "ymin", "ymax", "zmin", "zmax") if k in box}
+            raise ValueError(
+                f"Box selection '{tag}' matched no entities (box={bounds}). "
+                "Nothing fell inside this box even after expanding it and trying "
+                "allvertices/intersects. Check the coordinates (SI metres), or "
+                "pick boundaries explicitly with {\"where\": {\"boundaries\": [...]}}."
+            )
+
+        self.log.append({
+            "step": "selection_box",
+            "tag": tag,
+            "entitydim": dim,
+            "condition": used_condition,
+            "boundaries": selected,
+            "box_margin": used_delta,
+        })
+        return selection.tag()
+
+    def _mesh(self) -> None:
+        mesh_spec = self.spec.get("mesh", {})
+        tag = mesh_spec.get("tag", "mesh1")
+        existing = {mesh.tag(): mesh for mesh in self.component.mesh()}
+        mesh = existing.get(tag) or session_manager.retry_comsol_busy(
+            lambda: self.component.mesh().create(tag)
+        )
+        if mesh_spec.get("size") is not None:
+            try:
+                size = int(mesh_spec["size"])
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"mesh.size must be an integer in 1..9, got {mesh_spec['size']!r}.")
+            if not 1 <= size <= 9:
+                # Out-of-range values reach COMSOL and can blow the mesh up so
+                # hard that the JVM aborts and the whole MCP process dies.
+                raise ValueError(
+                    f"mesh.size must be in 1..9 (COMSOL predefined sizes), got {size}.")
+            session_manager.retry_comsol_busy(lambda: mesh.autoMeshSize(size))
+        if mesh_spec.get("run", True):
+            session_manager.retry_comsol_busy(lambda: mesh.run())
+        self.log.append({"step": "mesh", "tag": mesh.tag(), "ran": mesh_spec.get("run", True)})
+
+    def _study(self) -> str:
+        study_spec = self.spec.get("study", {"type": "Stationary"})
+        tag = study_spec.get("tag", "std1")
+        study_type = study_spec.get("type", "Stationary")
+        capability = STUDY_CAPABILITIES.get(study_type)
+        if capability is None:
+            raise ValueError(f"study.type must be one of {sorted(STUDY_CAPABILITIES)}.")
+        step_tag = study_spec.get("step_tag") or capability["default_step"]
+        comsol_type = capability["comsol_type"]
+        tlist = study_spec.get("tlist")
+        if tlist and comsol_type != "Transient":
+            raise ValueError("study.tlist is only valid when study.type is TimeDependent.")
+        jm = self.model.java
+        existing = {study.tag(): study for study in jm.study()}
+        study = existing.get(tag) or session_manager.retry_comsol_busy(
+            lambda: jm.study().create(tag)
+        )
+        existing_steps = {step.tag(): step for step in study.feature()}
+        if step_tag not in existing_steps:
+            session_manager.retry_comsol_busy(lambda: study.feature().create(step_tag, comsol_type))
+        step = study.feature(step_tag)
+        if tlist:
+            session_manager.retry_comsol_busy(lambda: step.set("tlist", str(tlist)))
+        self.log.append({"step": "study", "tag": tag, "type": study_type,
+                         "study_step": step_tag, "tlist": tlist})
+        return tag
+
+    # Scalar field used to sanity-check a solved model, keyed by physics
+    # interface. Only fields with a single unambiguous scalar variable are
+    # listed; anything else is simply not verified (no false alarms).
+    VERIFY_EXPRESSIONS: dict[str, str] = {
+        "HeatTransfer": "T",
+        "Electrostatics": "V",
+    }
+
+    def _solve(self, study_tag: str) -> tuple[bool, str | None]:
+        if not self.solve:
+            return False, None
+        self._preflight()
+        try:
+            self.model.java.study(study_tag).run()
+            self.log.append({"step": "solve", "study": study_tag, "success": True})
+        except Exception as exc:
+            self.log.append({"step": "solve", "study": study_tag, "success": False, "error": str(exc)})
+            return False, str(exc)
+
+        # A stationary solve can return without raising while being badly
+        # under-converged: on a coarse mesh the temperature overshot the applied
+        # boundary values (377.59 K against a 373.15 K boundary, i.e. a result
+        # that violates the maximum principle). Verify the field against the
+        # boundary data and refine the mesh once if it disagrees.
+        problem = self._verify_solution()
+        if problem is None:
+            return True, None
+
+        if self._refine_mesh():
+            self.log.append({"step": "solve_retry", "reason": problem})
+            try:
+                self.model.java.study(study_tag).run()
+            except Exception as exc:
+                self.log.append({"step": "solve", "study": study_tag, "success": False, "error": str(exc)})
+                return False, str(exc)
+            problem = self._verify_solution()
+            if problem is None:
+                self.log.append({"step": "solve", "study": study_tag, "success": True, "verified": True})
+                return True, None
+
+        self.log.append({"step": "solve_unverified", "reason": problem})
+        return True, problem
+
+    def _preflight(self) -> None:
+        """Refuse to solve a model whose boundary conditions select no entities.
+
+        An empty selection silently leaves COMSOL's default insulation in place.
+        For a stationary problem that makes the system singular, and the failure
+        mode is nasty: either a non-convergence error, or a solve that reports
+        success while returning numbers that violate the applied boundary values.
+        Checking here turns a silent wrong answer into an immediate, actionable
+        error.
+        """
+        for physics_spec in _as_list(self.spec.get("physics")):
+            if not isinstance(physics_spec, dict):
+                continue
+            tag = PHYSICS_ALIAS_TO_TAG.get(_norm(str(physics_spec.get("type", ""))))
+            capability = PHYSICS_CAPABILITIES.get(tag) if tag else None
+            if capability is None:
+                continue
+            physics = {item.tag(): item for item in self.component.physics()}.get(capability.tag)
+            if physics is None:
+                continue
+            features = {item.tag(): item for item in physics.feature()}
+            for index, bc_spec in enumerate(_as_list(physics_spec.get("boundary_conditions"))):
+                if not isinstance(bc_spec, dict):
+                    continue
+                bc_tag = bc_spec.get("tag") or f"{capability.tag}bc{index + 1}"
+                feature = features.get(bc_tag)
+                if feature is None:
+                    continue
+                try:
+                    entities = list(feature.selection().entities())
+                except Exception:
+                    continue
+                if not entities:
+                    raise ValueError(
+                        f"Boundary condition '{bc_tag}' selects no entities. Either its "
+                        "'where' clause matches no face, or another condition on the same "
+                        "physics already claims that face - COMSOL removes a boundary from "
+                        "an earlier feature when a later feature selects it, so two "
+                        "conditions must not share a face. Name faces symbolically "
+                        '({"face": "zmin"|"zmax"|"xmin"|"xmax"|"ymin"|"ymax"}, '
+                        '{"normal": "+z"} or {"outer": true}) to be sure they differ, or '
+                        'list ids with {"boundaries": [...]}.'
+                    )
+        self.log.append({"step": "preflight", "checked": True})
+
+    # Boundary conditions that impose the verified field directly (Dirichlet).
+    DIRICHLET_FIELD_VALUES: dict[tuple[str, str], str] = {
+        ("HeatTransfer", "TemperatureBoundary"): "T0",
+        ("HeatTransfer", "Temperature"): "T0",
+        ("Electrostatics", "ElectricPotential"): "V0",
+    }
+
+    def _verify_solution(self) -> str | None:
+        """Check a pure-Dirichlet steady solution against its imposed values.
+
+        Only problems whose boundary data consists entirely of field-imposing
+        (Dirichlet) conditions are checked, because only there does the
+        maximum principle bound the solution by the imposed values. Models
+        with flux, convective, flow, load, or charge boundary conditions, and
+        transient/frequency-domain studies, are skipped: their fields
+        legitimately leave the imposed range, and checking them produced false
+        "violates its own boundary data" errors (measured 2026-09-12 on a
+        transient heat-flux run whose solution was physically correct).
+
+        Returns None when the solution is consistent or cannot be checked
+        automatically; otherwise a human-readable violation.
+        """
+        import numpy as np
+
+        study = self.spec.get("study", {})
+        study_type = study.get("type", "Stationary") if isinstance(study, dict) else "Stationary"
+        if study_type not in ("Stationary", "Eigenfrequency"):
+            return None
+
+        for physics_spec in _as_list(self.spec.get("physics")):
+            if not isinstance(physics_spec, dict):
+                continue
+            tag = PHYSICS_ALIAS_TO_TAG.get(_norm(str(physics_spec.get("type", ""))))
+            capability = PHYSICS_CAPABILITIES.get(tag) if tag else None
+            if capability is None:
+                continue
+            expression = self.VERIFY_EXPRESSIONS.get(capability.interface)
+            if expression is None:
+                continue
+
+            imposed: list[float] = []
+            dirichlet_only = True
+            for bc in _as_list(physics_spec.get("boundary_conditions")):
+                if not isinstance(bc, dict):
+                    continue
+                bc_type = str(bc.get("type", ""))
+                prop_name = self.DIRICHLET_FIELD_VALUES.get(
+                    (capability.interface, bc_type))
+                if prop_name is None:
+                    if capability.interface == "Electrostatics" and bc_type == "Ground":
+                        imposed.append(0.0)
+                        continue
+                    dirichlet_only = False
+                    break
+                number = _leading_number((bc.get("properties") or {}).get(prop_name))
+                if number is None:
+                    dirichlet_only = False
+                    break
+                imposed.append(number)
+            if not dirichlet_only:
+                self.log.append({
+                    "step": "verify_skipped",
+                    "physics": capability.tag,
+                    "reason": "non-Dirichlet boundary conditions present; the field is "
+                              "not bounded by the imposed values",
+                })
+                continue
+            if len(imposed) < 2:
+                continue
+
+            try:
+                array = np.asarray(self.model.evaluate(expression), dtype=float).reshape(-1)
+            except Exception:
+                continue
+            array = array[np.isfinite(array)]
+            if array.size == 0:
+                continue
+
+            low, high = min(imposed), max(imposed)
+            tolerance = 1e-3 * abs(high - low) + 1e-6
+            if array.max() > high + tolerance or array.min() < low - tolerance:
+                return (
+                    f"solved {expression} spans [{array.min():.4f}, {array.max():.4f}] "
+                    f"but the imposed boundary values are [{low:.4f}, {high:.4f}]. "
+                    "The solution violates its own boundary data, so the numbers "
+                    "must not be used."
+                )
+        return None
+
+    def _refine_mesh(self) -> bool:
+        """One-step mesh refinement used by the solve retry above."""
+        mesh_spec = self.spec.setdefault("mesh", {})
+        try:
+            current = int(mesh_spec.get("size") or 5)
+        except (TypeError, ValueError):
+            current = 5
+        if current <= 1:
+            return False
+        mesh_spec["size"] = max(1, current - 2)
+        mesh_spec["run"] = True
+        try:
+            self._mesh()
+        except Exception:
+            return False
+        return True
+
+    def _outputs(self, solved: bool) -> list[dict[str, Any]]:
+        if not self.collect_outputs or (self.solve and not solved):
+            return []
+        import numpy as np
+
+        outputs: list[dict[str, Any]] = []
+        for output in self.spec.get("outputs", []):
+            expression = output["expression"]
+            unit = output.get("unit")
+            try:
+                value = self.model.evaluate(expression, unit=unit, dataset=output.get("dataset"))
+                array = np.asarray(value, dtype=float).reshape(-1)
+                result = {
+                    "success": True,
+                    "name": output.get("name"),
+                    "type": output["type"],
+                    "expression": expression,
+                    "unit": unit,
+                }
+                if output["type"] in {"summary", "field"} and not output.get("raw", False):
+                    result["summary"] = {
+                        "count": int(array.size),
+                        "min": float(np.nanmin(array)),
+                        "max": float(np.nanmax(array)),
+                        "mean": float(np.nanmean(array)),
+                        "sample": array[: int(output.get("sample_size", 10))].tolist(),
+                    }
+                elif output["type"] in {"max", "min"}:
+                    index = int(np.nanargmax(array) if output["type"] == "max" else np.nanargmin(array))
+                    result["value"] = float(array[index])
+                    result["index"] = index
+                    result["position"] = self._position_for_index(index, output.get("dataset"))
+                else:
+                    result["value"] = array.tolist() if hasattr(value, "tolist") else value
+                outputs.append(result)
+            except Exception as exc:
+                outputs.append({
+                    "success": False,
+                    "name": output.get("name"),
+                    "type": output["type"],
+                    "expression": expression,
+                    "error": str(exc),
+                })
+        self.log.append({"step": "outputs", "count": len(outputs)})
+        return outputs
+
+    def _position_for_index(self, index: int, dataset: str | None) -> list[float] | None:
+        import numpy as np
+
+        try:
+            coords = self.model.evaluate(["x", "y", "z"], dataset=dataset)
+            arrays = [np.asarray(coord, dtype=float).reshape(-1) for coord in coords]
+            if all(array.size > index for array in arrays):
+                return [float(array[index]) for array in arrays]
+        except Exception:
+            return None
+        return None
+
+
+def register_workflow_tools(mcp: FastMCP) -> None:
+    """Register structured workflow tools with the MCP server."""
+
+    @mcp.tool()
+    def workflow_capabilities(section: str = "", physics: str = "") -> dict:
+        """
+        Return the supported structured workflow schema and capability registry.
+
+        The full payload runs to several thousand characters, most of it the
+        boundary-condition tables of every physics interface. Narrow it when you
+        only need part of it - e.g. section='physics' with physics='ht,spf'
+        before writing those interfaces.
+
+        Args:
+            section: Return only one part: 'spec_schema', 'geometry', 'physics', 'studies' or 'outputs'
+            physics: Only these interfaces' boundary-condition tables, comma-separated, e.g. 'ht,spf'
+
+        Returns:
+            Supported geometry types, physics interfaces, boundary conditions,
+            studies, outputs, and the expected spec shape.
+        """
+        payload = _capabilities_payload()
+        if physics:
+            wanted = set()
+            for part in physics.split(","):
+                token = part.strip()
+                if token:
+                    tag = PHYSICS_ALIAS_TO_TAG.get(_norm(token), token)
+                    wanted.add(str(tag).lower())
+            table = payload.get("physics")
+            if isinstance(table, dict):
+                payload["physics"] = {key: value for key, value in table.items()
+                                      if key.lower() in wanted}
+        if section:
+            key = section.strip().lower()
+            if key not in payload:
+                return {"success": False,
+                        "error": f"section must be one of {sorted(payload)}"}
+            payload = {key: payload[key]}
+        return {"success": True, "capabilities": payload}
+
+    @mcp.tool()
+    def workflow_validate_spec(spec: dict) -> dict:
+        """
+        Validate a structured simulation spec before touching COMSOL.
+
+        Args:
+            spec: Structured simulation specification object
+
+        Returns:
+            Validation errors, warnings, and supported schema summary
+        """
+        result = SpecValidator(spec).validate()
+        return {"success": True, **result}
+
+    @mcp.tool()
+    def workflow_execute_spec(
+        spec: dict,
+        solve: bool = True,
+        collect_outputs: bool = True,
+        ctx: Context | None = None,
+    ) -> dict:
+        """
+        Execute a structured simulation spec with a fixed Java API workflow.
+
+        Args:
+            spec: Structured simulation specification object
+            solve: Whether to solve after building the model
+            collect_outputs: Whether to evaluate requested outputs after solving
+
+        Returns:
+            Execution log, solve status, outputs, or structured error
+        """
+        validation = SpecValidator(spec).validate()
+        if not validation["valid"]:
+            return {"success": False, "stage": "validate", **validation}
+
+        # Push notifications/progress as stages complete. Clients that do not
+        # support it simply ignore the notifications; the callback swallows any
+        # error so progress reporting can never fail a workflow run.
+        progress = None
+        if ctx is not None:
+            def progress(index: int, total: int, message: str) -> None:
+                try:
+                    ctx.report_progress(progress=index, total=total, message=message)
+                except Exception:
+                    pass
+
+        result = JavaWorkflowExecutor(spec, solve=solve, collect_outputs=collect_outputs,
+                                      progress=progress).run()
+        result["warnings"] = validation["warnings"]
+        return result

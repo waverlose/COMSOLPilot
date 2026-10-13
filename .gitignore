@@ -1,0 +1,53 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+.venv/
+venv/
+env/
+
+*.log
+.DS_Store
+Thumbs.db
+
+# Runtime workspace. Keep generated artifacts out of source control.
+workspace/cache/*
+workspace/config/*
+workspace/tmp/*
+workspace/logs/*
+workspace/exports/*
+workspace/models/*
+workspace/knowledge_base/*
+workspace/pdf/*
+!workspace/cache/.gitkeep
+!workspace/config/.gitkeep
+!workspace/tmp/.gitkeep
+!workspace/logs/.gitkeep
+!workspace/exports/.gitkeep
+!workspace/models/.gitkeep
+!workspace/knowledge_base/.gitkeep
+!workspace/pdf/.gitkeep
+
+# COMSOL model files are usually large generated artifacts.
+*.mph
+config_example.json
+config_example.md
+/comsol_models/
+/knowledge_base/
+/pdf/
+
+# Keep optional example model directory visible even when .mph files are ignored.
+!examples/models/
+!examples/models/.gitkeep
+
+# COMSOLPilot runtime state
+workspace/reports/*
+!workspace/reports/.gitkeep
+workspace/runtime.json
+workspace/settings.json
