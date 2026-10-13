@@ -129,8 +129,8 @@ python scripts/sync_mcp_port.py --ensure --only workbuddy
 ```
 
 Supported clients / 支持的客户端:
-`Agens` `workbuddy` `claude-code` `claude-desktop` `gemini` 
-`windsurf` `opencode` `codex` `deepseek` `Agens` `cursor`
+`Agens` `workbuddy` `claude-code` `claude-desktop` `gemini` `cursor`
+`windsurf` `opencode` `codex` `deepseek`
 
 Full details, config paths and format examples / 完整说明（含各客户端配置路径与三种格式示例）:
 **[docs/CONNECTORS_CN.md](docs/CONNECTORS_CN.md)**
