@@ -3,6 +3,22 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 title COMSOLPilot
 chcp 936 >nul
+REM Interactive runs open in Windows Terminal when it is installed - the
+REM menu uses colours and aligned columns that render best there. The
+REM COMSOLPILOT_IN_WT guard stops the relaunched instance from spawning
+REM another terminal; script runs (headless/gui/...) never come here.
+if "%~1"=="" if not defined COMSOLPILOT_IN_WT (
+    where wt.exe >nul 2>nul
+    if not errorlevel 1 (
+        REM The guard is passed through the child's own command line: a
+        REM plain "set" here would only affect this process, and the new
+        REM cmd does not inherit it - without re-setting it inside the
+        REM child, the launcher would open Windows Terminal forever.
+        start "" wt.exe -p "COMSOLPilot" cmd /k "set COMSOLPILOT_IN_WT=1 && ""%~f0"""
+        exit /b 0
+    )
+)
+
 
 REM ===========================================================================
 REM  COMSOLPilot - COMSOL server launcher
