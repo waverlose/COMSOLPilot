@@ -388,6 +388,41 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 $mode = if ($OpenDesktop) { "gui" } else { "headless" }
 
+# The launcher and the MCP connector share ONE configuration file: config.toml
+# at the repository root. It is read through Python (which owns the parser),
+# with the older workspace/settings.json kept as a fallback for absent keys.
+$resolvedPython = Find-PythonExe -Explicit $PythonExe
+
+function Get-ConfiguredValue {
+    param([string]$Section, [string]$Key)
+    $helper = Join-Path $root "scripts\show_config.py"
+    if (-not $resolvedPython -or -not (Test-Path -LiteralPath $helper)) {
+        return ""
+    }
+    try {
+        Remove-DuplicateCaseEnvironmentVariables
+        $value = & $resolvedPython $helper $Section $Key 2>$null | Select-Object -Last 1
+        if ($null -eq $value) { return "" }
+        return ([string]$value).Trim()
+    }
+    catch {
+        return ""
+    }
+}
+
+function Get-SettingValue {
+    param([string]$Key)
+    $settingsPath = Join-Path $root "workspace\settings.json"
+    if (-not (Test-Path -LiteralPath $settingsPath)) { return "" }
+    try {
+        $json = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+        return [string]($json.$Key)
+    }
+    catch {
+        return ""
+    }
+}
+
 # COMSOL version: config.toml first, then settings.json, so double-clicking the
 # .bat behaves exactly like starting from the menu and cannot silently launch
 # the other installation. Resolved before the "already listening" branch below,
@@ -442,41 +477,6 @@ if (-not (Test-PortBindable -PortNumber $Port)) {
     Write-Warning "Port $Port is not bindable (held by another process, often an ephemeral socket). Using $fallbackPort instead."
     Write-Warning "Point the MCP client at it with COMSOL_PORT=$fallbackPort, or it will look on the wrong port."
     $Port = $fallbackPort
-}
-
-# The launcher and the MCP connector share ONE configuration file: config.toml
-# at the repository root. It is read through Python (which owns the parser),
-# with the older workspace/settings.json kept as a fallback for absent keys.
-$resolvedPython = Find-PythonExe -Explicit $PythonExe
-
-function Get-ConfiguredValue {
-    param([string]$Section, [string]$Key)
-    $helper = Join-Path $root "scripts\show_config.py"
-    if (-not $resolvedPython -or -not (Test-Path -LiteralPath $helper)) {
-        return ""
-    }
-    try {
-        Remove-DuplicateCaseEnvironmentVariables
-        $value = & $resolvedPython $helper $Section $Key 2>$null | Select-Object -Last 1
-        if ($null -eq $value) { return "" }
-        return ([string]$value).Trim()
-    }
-    catch {
-        return ""
-    }
-}
-
-function Get-SettingValue {
-    param([string]$Key)
-    $settingsPath = Join-Path $root "workspace\settings.json"
-    if (-not (Test-Path -LiteralPath $settingsPath)) { return "" }
-    try {
-        $json = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
-        return [string]($json.$Key)
-    }
-    catch {
-        return ""
-    }
 }
 
 # Authentication mode: the command-line switch wins, then config.toml, then the
