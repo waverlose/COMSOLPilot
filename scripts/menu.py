@@ -26,6 +26,8 @@ from src import config  # noqa: E402
 BOLD = "\x1b[1m"
 CYAN = "\x1b[96m"
 YELLOW = "\x1b[93m"
+GREEN = "\x1b[92m"
+GREY = "\x1b[90m"
 RESET = "\x1b[0m"
 
 REDRAW = 255
@@ -77,10 +79,29 @@ def _cells(text: str) -> int:
     return sum(2 if ord(char) > 0x2E80 else 1 for char in text)
 
 
-def _info_line() -> str:
+def _server_running() -> bool:
+    """Is a COMSOL server listening on the configured port? One TCP dial."""
+    import socket
+
+    try:
+        port = int(config.get("comsol", "port") or 2036)
+    except (TypeError, ValueError):
+        return False
+    try:
+        with socket.create_connection(("localhost", port), timeout=0.4):
+            return True
+    except OSError:
+        return False
+
+
+def _info_line(colour: bool) -> str:
+    running = _server_running()
+    dot = ((GREEN if running else GREY) if colour else "") + ("●" if running else "○")
     pairs = [
         ("端口:", str(config.get("comsol", "port"))),
         ("COMSOL:", str(config.get("comsol", "version") or "auto")),
+        ("服务端:", dot + (RESET if colour else "")
+         + (" 运行中" if running else " 未运行")),
     ]
     parts = []
     for label, value in pairs:
@@ -112,14 +133,14 @@ def draw(colour: bool, status: dict) -> None:
     if colour:
         print(CYAN + banner.text() + RESET)
         print()
-        print(_info_line())
+        print(_info_line(colour))
         if notice:
             print(notice)
         print()
     else:
         print(banner.text())
         print()
-        print(_info_line().replace(BOLD, "").replace(RESET, ""))
+        print(_info_line(False).replace(BOLD, ""))
         if notice:
             print(notice.replace(BOLD, "").replace(YELLOW, "").replace(RESET, ""))
         print()

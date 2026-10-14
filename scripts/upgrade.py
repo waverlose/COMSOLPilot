@@ -266,7 +266,6 @@ def main() -> int:
     if behind == 0:
         _remember_current(branch, ahead)
         say(_paint("  已是最新版本。", BOLD, GREEN))
-        say("  %s" % _describe("HEAD"))
         if ahead:
             say()
             say("  本地另有 %d 个提交尚未推送。" % ahead)
