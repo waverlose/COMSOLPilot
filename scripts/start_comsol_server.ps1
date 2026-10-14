@@ -388,17 +388,45 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 $mode = if ($OpenDesktop) { "gui" } else { "headless" }
 
+# COMSOL version: config.toml first, then settings.json, so double-clicking the
+# .bat behaves exactly like starting from the menu and cannot silently launch
+# the other installation. Resolved before the "already listening" branch below,
+# which compares it against the version that is actually running.
+if (-not $Version) {
+    $Version = Get-ConfiguredValue -Section "comsol" -Key "version"
+    if (-not $Version) { $Version = Get-SettingValue -Key "comsol_version" }
+    if ($Version) {
+        Write-Host "COMSOL version from config.toml: $Version"
+    }
+}
+
 if (Test-PortListening -HostName "localhost" -PortNumber $Port) {
-    Write-Host "COMSOL Server is already listening on localhost:$Port"
-    $owner = 0
+    # An already-running server is only a success when it is the one we were
+    # asked for. Reporting success here used to make a version change look
+    # applied while the old process (old version) simply stayed up.
+    $runningVersion = ""
     try {
-        $connection = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction Stop | Select-Object -First 1
-        if ($connection) { $owner = [int]$connection.OwningProcess }
+        $runtimePath = Join-Path $root "workspace\runtime.json"
+        if (Test-Path -LiteralPath $runtimePath) {
+            $runtime = Get-Content -LiteralPath $runtimePath -Raw | ConvertFrom-Json
+            if ([int]$runtime.port -eq $Port) { $runningVersion = [string]$runtime.comsol_version }
+        }
     }
     catch {
-        $owner = 0
     }
-    Complete-Startup -RealPort $Port -ProcessId $owner -ServerExe "" -Mode $mode
+    $wanted = $Version
+    if ($wanted -and $runningVersion -and ($runningVersion -ne $wanted)) {
+        Write-Warning ("Port $Port is held by COMSOL $runningVersion, but version $wanted is configured.")
+        Write-Warning "Nothing was started. Stop the server first (menu [3] / restart / stop_comsol_server.ps1), then start again."
+        exit 1
+    }
+    Write-Host "COMSOL Server is already listening on localhost:$Port"
+    if ($runningVersion) { Write-Host "Running version: $runningVersion" }
+    # Complete-Startup is deliberately NOT called: runtime.json describes the
+    # process that is actually running, and overwriting its server_exe /
+    # comsol_version from this branch used to record the *configured* version
+    # while the old process kept running - misleading the version pinning in
+    # session.py afterwards.
     exit 0
 }
 
@@ -461,16 +489,8 @@ if (-not $PSBoundParameters.ContainsKey("LoginMode")) {
     }
 }
 
-# COMSOL version: config.toml first, then settings.json, so double-clicking the
-# .bat behaves exactly like starting from the menu and cannot silently launch
-# the other installation.
-if (-not $Version) {
-    $Version = Get-ConfiguredValue -Section "comsol" -Key "version"
-    if (-not $Version) { $Version = Get-SettingValue -Key "comsol_version" }
-    if ($Version) {
-        Write-Host "COMSOL version from config.toml: $Version"
-    }
-}
+# COMSOL version was already resolved above, before the "already listening"
+# branch; it is compared against the running server there.
 
 $resolvedServer = Find-ComsolServerExe -Explicit $ServerExe -Py $resolvedPython -ComsolVersion $Version
 if (-not $resolvedServer) {

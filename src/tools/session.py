@@ -429,6 +429,17 @@ def _launch_server_process(port: Optional[int] = None, version: Optional[str] = 
         return {"success": False,
                 "error": "Could not locate comsolmphserver.exe (is COMSOL installed?)"}
     requested = port
+    # A server that is already up would make the wait loop below report instant
+    # "success" - for the *old* process, with whatever version it runs. A version
+    # change must never look like it applied when the old server simply stayed.
+    first_choice = requested if requested is not None else 2036
+    if port_listening("localhost", first_choice):
+        return {"success": False, "already_listening": True, "port": first_choice,
+                "exe": executable,
+                "running_version": _version_from_runtime(first_choice) or "",
+                "error": (f"A COMSOL server is already listening on port {first_choice}; "
+                          "nothing was started. To switch versions, stop it first "
+                          "(comsol_stop_server, or the launcher's restart) and start again.")}
     if port is not None and not port_bindable(port):
         free = _first_free_port(port + 1)
         if free is None:

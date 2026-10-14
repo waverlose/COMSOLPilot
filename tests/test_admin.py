@@ -179,3 +179,58 @@ class TestRegistration:
                 if "description" not in prop:
                     missing.append((tool.name, prop_name))
         assert missing == []
+
+
+class TestStartRefusesExistingServer:
+    """A server already on the port is not "started" - and must never look like it.
+
+    This is the hot-swap bug: with the old server still listening,
+    _launch_server_process's wait loop found the port open and reported success
+    for the *old* process, so a version change appeared to apply while nothing
+    but the runtime record changed.
+    """
+
+    def test_start_refuses_when_the_port_is_already_listening(
+            self, isolated_workspace, monkeypatch):
+        from src.tools import session as session_module
+
+        monkeypatch.setattr(session_module, "port_listening", lambda *a, **k: True)
+        monkeypatch.setattr(session_module, "server_exe",
+                            lambda version=None: "C:/fake/comsolmphserver.exe")
+
+        result = session_module._launch_server_process(port=2036, version="6.2")
+
+        assert result["success"] is False
+        assert result["already_listening"] is True
+        assert result["port"] == 2036
+        assert "stop" in result["error"].lower()
+
+    def test_the_refusal_names_the_version_that_is_running(
+            self, isolated_workspace, monkeypatch):
+        from src.tools import session as session_module
+
+        (isolated_workspace / "runtime.json").write_text(
+            '{"port": 2036, "comsol_version": "6.0"}', encoding="utf-8")
+        monkeypatch.setattr(session_module, "port_listening", lambda *a, **k: True)
+        monkeypatch.setattr(session_module, "server_exe",
+                            lambda version=None: "C:/fake/comsolmphserver.exe")
+
+        result = session_module._launch_server_process(port=2036)
+
+        assert result["running_version"] == "6.0"
+
+    def test_start_proceeds_when_the_port_is_free(self, isolated_workspace, monkeypatch):
+        from src.tools import session as session_module
+
+        # Nothing listens, discovery finds nothing bindable to launch against -
+        # the point is only that the pre-check does not fire.
+        monkeypatch.setattr(session_module, "port_listening", lambda *a, **k: False)
+        monkeypatch.setattr(session_module, "server_exe",
+                            lambda version=None: "C:/fake/comsolmphserver.exe")
+        monkeypatch.setattr(session_module, "port_bindable", lambda port: False)
+        monkeypatch.setattr(session_module, "_first_free_port", lambda start: None)
+
+        result = session_module._launch_server_process(port=2036)
+
+        assert result["success"] is False
+        assert "already_listening" not in result
