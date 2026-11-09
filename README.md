@@ -3,16 +3,12 @@
 # COMSOLPilot
 
 **Drive COMSOL Multiphysics with AI — through MCP.**
-**用 MCP 让 AI 直接驱动 COMSOL 多物理场仿真。**
 
 One MCP server + one-click launcher. 121 tools in two tiers. From geometry to
 results — watch every step live in COMSOL Desktop.
 
-一个 MCP 服务端 + 一键启动脚本，121 个工具，分两级。
-从几何建模到结果后处理，每一步都在 COMSOL Desktop 里实时可见。
-
-**New: the AI starts and configures COMSOL for you.** 启动与配置可以直接在对话里完成
-——见 [docs/AI_SETUP_CN.md](docs/AI_SETUP_CN.md)。
+**The AI can start and configure COMSOL for you.** See the
+[AI setup guide](docs/AI_SETUP_CN.md) (Chinese).
 
 `Windows` `COMSOL 6.x` `MCP` `Python 3.10+` `JPype / MPh`
 
@@ -20,65 +16,56 @@ results — watch every step live in COMSOL Desktop.
 
 ---
 
-## What is this? / 这是什么？
+## What is this?
 
 COMSOLPilot exposes COMSOL Multiphysics as an MCP server, so any MCP-capable
 AI client (WorkBuddy, Claude Code, OpenCode, Codex, Cursor, ...) can build and
-run simulations for you — while you watch in COMSOL Desktop.
+run simulations for you while you watch in COMSOL Desktop.
 
-COMSOLPilot 把 COMSOL Multiphysics 封装为 MCP 服务端，任何支持 MCP 的 AI
-客户端（WorkBuddy、Claude Code、OpenCode、Codex、Cursor 等）都可以替你建模
-求解——而你在 COMSOL Desktop 里全程围观。
-
-**GUI-sync mode / GUI 同步模式**：the AI connects to the same COMSOL server
-as your Desktop. Every geometry node, material, physics setting and result
-appears in your model tree in real time. You are never out of the loop.
-
-AI 与你的 Desktop 连接同一个服务端：AI 建的几何、材料、物理场、结果会实时
-出现在你的模型树里，随时可以接手检查或手动修改。
+**GUI-sync mode:** the AI connects to the same COMSOL server as your Desktop.
+Every geometry node, material, physics setting and result appears in your model
+tree in real time. You can inspect the model or take over manually at any point.
 
 ---
 
-## Features / 特性
+## Features
 
-Documentation search and verified troubleshooting notes are described in
-[docs/REFERENCE_KNOWLEDGE_CN.md](docs/REFERENCE_KNOWLEDGE_CN.md).
+Documentation search and verified troubleshooting notes are described in the
+[reference and knowledge guide](docs/REFERENCE_KNOWLEDGE_CN.md) (Chinese).
 
-| Feature 特性 | Description 说明 |
+| Feature | Description |
 |---|---|
-| 121 tools / 121 个工具 | geometry (blocks, cylinders, boolean ops), materials, physics (es/ec/ht/spf/solid), mesh, studies, results, plots, parametric sweeps 几何、材料、物理场、网格、求解、结果、绘图、参数扫描 |
-| Two-tier surface / 两级工具面 | only `tools_catalog`, `tools_describe`, `tools_call` are visible; the other 117 are reached by name, so the tool list stays small 一级只暴露 3 个工具，其余按名字经 `tools_call` 调用，工具表保持精简 |
-| GUI sync / 桌面同步 | AI works on the same server as your Desktop — watch live AI 与 Desktop 共用服务端，操作实时可见 |
-| AI-driven setup / 对话式启动 | MCP connects immediately; COMSOL starts on the first modeling request. MCP 先就绪，首次建模自动启动 COMSOL，版本、端口和客户端在对话里配置 |
-| One-click launcher / 一键启动 | one-time env bootstrap, then a menu that only asks GUI or headless - everything else lives in `config.toml` 首次运行自动配环境；之后菜单只问 GUI/无头，其余全在 `config.toml` |
-| Multi-client / 多客户端 | register into 9 MCP clients on demand — nothing is written without your explicit command 按需注册进 9 种 MCP 客户端，未经指令绝不写入任何配置 |
-| Self-healing / 自愈 | connector detects a dead/restarted server and reconnects on its own 连接器自动识别服务端重启并重连 |
+| 121 tools | Geometry (blocks, cylinders, boolean operations), materials, physics (es/ec/ht/spf/solid), mesh, studies, results, plots and parametric sweeps |
+| Two-tier surface | Only `tools_catalog`, `tools_describe` and `tools_call` are visible by default; the other 118 tools are reached by name |
+| GUI sync | The AI works on the same server as your Desktop, so you can watch its operations live |
+| AI-driven setup | MCP connects immediately; COMSOL starts on the first modeling request. Configure the version, port and client through conversation |
+| One-click launcher | One-time environment setup, followed by a GUI/headless menu; shared settings live in `config.toml` |
+| Multi-client | Register a selected MCP client on demand; client configuration is written only when you request it |
+| Reconnection | The connector detects a dead or restarted server and attempts to reconnect |
 
 ---
 
-## Requirements / 环境要求
+## Requirements
 
-- Windows 10 1903+ (Windows Terminal recommended / 建议安装 Windows Terminal)
-- COMSOL Multiphysics 6.x, any license that runs the server / 任何能启动服务端的许可证
-- Python 3.10+ (only needed once, by the first-run bootstrap / 仅首次引导需要)
-- An MCP-capable AI client / 任一支持 MCP 的 AI 客户端
+- Windows 10 1903+ (Windows Terminal recommended)
+- COMSOL Multiphysics 6.x, with a license that can run the server
+- Python 3.10+ for the initial environment setup
+- An MCP-capable AI client
 
 ---
 
-## Quick Start / 快速开始
+## Quick Start
 
-**One-time environment setup** (creates `.venv`, installs dependencies):
-一次性准备环境（创建 `.venv` 并安装依赖）：
+**One-time environment setup** (creates `.venv` and installs dependencies):
 
 ```bat
 git clone https://github.com/waverlose/COMSOLPilot.git
-cd comsolpilot
+cd COMSOLPilot
 start_comsol_server.bat
 ```
 
-`start_comsol_server.bat` on its first run builds `.venv` and installs the
-dependencies (3-5 min, once). Equivalent manual command:
-脚本首次运行会创建虚拟环境并装依赖（仅一次，3~5 分钟）；等价的手动命令：
+On its first run, `start_comsol_server.bat` creates `.venv` and installs the
+dependencies. Equivalent manual command:
 
 ```bat
 python -m venv .venv && .venv\Scripts\python -m pip install -r requirements-windows.txt
@@ -86,180 +73,172 @@ python -m venv .venv && .venv\Scripts\python -m pip install -r requirements-wind
 
 **Daily use: open your AI client and ask it to build a model. No bat is required.**
 
-**日常使用：打开 AI 客户端，直接提出建模需求，不再手动打开 bat。**
-
 MCP becomes available immediately. Tool discovery, documentation search and spec
 validation do not start COMSOL. The first modeling request starts an isolated
 COMSOL worker; an existing server is reused. No connector reconnect is needed.
+Status queries remain available during COMSOL initialization.
 
-MCP 先就绪，首次建模自动启动独立工作进程，已有服务端直接复用。
-COMSOL 初始化期间仍可查询状态，无需重连连接器。
+- `code=comsol_starting`: the original request has not executed. Query
+  `comsol_status`, wait for `state=ready`, then retry the original request.
+- `code=operation_in_progress`: the operation has been submitted. Do not replay
+  it; use its `request_id` to retrieve the result from `last_operation.result`
+  in the status response.
+- Startup failure: inspect the error or `workspace/logs/worker.log`, then retry
+  with `comsol_start_server`.
 
-- `code=comsol_starting`：原请求尚未执行；查询 `comsol_status`，等 `state=ready` 后重试。
-- `code=operation_in_progress`：操作已提交；不要重放，按 `request_id` 从
-  `last_operation.result` 读取最终结果。
-- 启动失败：检查错误或 `workspace/logs/worker.log`，调用 `comsol_start_server` 重试。
+On Windows, the connector caches JPype's native bridge on an ASCII temporary
+path when needed, so the project can stay in a directory with non-ASCII characters.
+Check `runtime.native_bridge_ready` in `comsol_environment` for its status.
 
-Windows 中文目录下，连接器会将 JPype 原生桥接库缓存到英文临时路径，无需搬迁项目。
-`comsol_environment` 的 `runtime.native_bridge_ready` 可确认原生库路径是否就绪。
+Startup is on demand by default. Set `[connector] autostart=true` to start COMSOL
+in the background when MCP connects. See the [AI setup guide](docs/AI_SETUP_CN.md)
+(Chinese) for details.
 
-默认按需启动；`[connector] autostart=true` 可选择连接 MCP 时后台提前启动。
-详细用法见 **[docs/AI_SETUP_CN.md](docs/AI_SETUP_CN.md)**。
-
-`start_comsol_server.bat` 保留用于首次环境准备、手动管理、升级与排障。
+The bat launcher remains available for initial setup, manual management,
+upgrades and troubleshooting.
 
 ---
 
-## Connect an AI client / 接入 AI 客户端
+## Connect an AI client
 
-Nothing is written automatically. You choose the client, you run the command.
-
-**不会自动写入任何客户端配置。** 你选客户端，你执行命令。
+Choose a client and run the corresponding command:
 
 ```bash
-# a) print a paste-ready example / 打印示例，自己粘贴
+# Print a configuration example to paste into your client.
 python -m src.cli config --client workbuddy
 
-# b) register into exactly one client / 只写入你点名的这一个
+# Register only the selected client.
 python scripts/sync_mcp_port.py --ensure --only workbuddy
 ```
 
-Supported clients / 支持的客户端:
+Supported clients:
 `Agens` `workbuddy` `claude-code` `claude-desktop` `gemini` `cursor`
 `windsurf` `opencode` `codex` `deepseek`
 
-Full details, config paths and format examples / 完整说明（含各客户端配置路径与三种格式示例）:
-**[docs/CONNECTORS_CN.md](docs/CONNECTORS_CN.md)**
+Configuration paths and format examples are in the
+[client connection guide](docs/CONNECTORS_CN.md) (Chinese).
 
-After registering, trust/enable `comsolpilot` in the client's connector page — once.
-注册后在客户端的连接器页面信任/启用一次即可。
+After registering, trust or enable `comsolpilot` in the client's connector page
+once.
 
 ---
 
-## Configuration / 配置
+## Configuration
 
 One file configures this installation: **`config.toml`** at the project root.
-The launcher script and the MCP connector both read it, so a change is made
-once instead of in every client's config.
-
-一个文件管全部：项目根目录的 **`config.toml`**。启动脚本和 MCP 连接器都读它。
+The launcher and MCP connector both read it, so you only need to change a shared
+setting once.
 
 ```toml
 [comsol]
-port = 2036          # 服务端端口
-mode = "gui"         # gui（Desktop 可围观）| headless
-version = ""         # 固定版本，如 "6.2"；留空 = 最新
+port = 2036          # Server port
+mode = "gui"         # gui (visible in Desktop) | headless
+version = ""         # Pin a version, e.g. "6.2"; empty selects the latest installed
 login_mode = "auto"  # auto | never | info | force
 open_desktop = true
 
 [connector]
-autostart = false    # false：首次建模按需启动；true：连接时后台提前启动
-entry_name = "comsolpilot"   # 注册进客户端时的条目名
+autostart = false    # false: start on first modeling request; true: start on connect
+entry_name = "comsolpilot"   # Client configuration entry name
 
 [ui]
-spinner = "claude"   # 启动/停止时的动画：claude | plain | auto | off
-
+spinner = "claude"   # Startup/shutdown animation: claude | plain | auto | off
 ```
 
-Priority / 优先级: environment variable > `config.toml` > `workspace/settings.json` (runtime state).
-The assistant can change these too, with `comsol_set_preferences` (it rewrites
-`config.toml`, keeping your comments).
+Priority: environment variable > `config.toml` > `workspace/settings.json`
+(runtime state). The assistant can update preferences with
+`comsol_set_preferences`, which preserves comments in `config.toml`.
+
+Version and port settings apply when starting a new COMSOL worker session.
+`comsol_start_server` reuses an already-ready worker; it does not switch that
+worker's active version or port. Reconnect the MCP server to start a new worker
+with changed settings.
 
 ---
 
-## Tool surface: two tiers / 工具分层
+## Tool surface: two tiers
 
-The server advertises just three tools, so the tool list stays small. Everything
-else is reached by name through `tools_call` — with the same schemas, docs and
-logging as before.
-
-一级只暴露 3 个工具，其余全部按名字经 `tools_call` 调用，schema／文档／日志完全一致。
+The server advertises three tools by default. Everything else is reached by name
+through `tools_call`, with its input schema, documentation and logging.
 
 ```text
-tools_catalog()                                  # list everything, grouped
-tools_catalog(query="thermal conduction")         # or search by keyword
-tools_describe("geometry_add_block")              # inspect the input schema
+tools_catalog()                                  # List tools by group
+tools_catalog(query="thermal conduction")         # Search by keyword
+tools_describe("geometry_add_block")              # Inspect the input schema
 tools_call("geometry_add_block", {"size": [0.1, 0.1, 0.1]})
 ```
 
-Prefer the flat surface? Set `COMSOLPILOT_TOOL_TIER=flat`. Pin favourites to the
+For the flat surface, set `COMSOLPILOT_TOOL_TIER=flat`. Pin selected tools to the
 top level with `COMSOLPILOT_TOP_LEVEL_TOOLS=comsol_status,model_list`.
-Details / 详见 **[docs/TOOL_TIERS_CN.md](docs/TOOL_TIERS_CN.md)**。
+See the [tool tiers guide](docs/TOOL_TIERS_CN.md) (Chinese).
 
 ---
 
-## Try it / 试一试
+## Try it
 
-Tell your AI / 对 AI 说：
+Tell your AI:
 
 > Build a 10x10x1 mm dielectric slab (eps_r = 4.5), 1 V on the bottom, ground
 > on top, and compare the numerical capacitance with the parallel-plate formula.
->
-> 建一个 10x10x1 mm 的介质板（相对介电常数 4.5），底面 1V、顶面接地，把数值
-> 电容和平板电容公式对比一下。
 
-Expect about 3.98438 pF from both — the finite element answer matches the
-analytic formula to roughly eight decimal places.
-数值与理论值都会是约 3.98438 pF，吻合到小数点后八位。
+The parallel-plate formula gives approximately 3.98438 pF. Compare the numerical
+result with this value after checking the material and boundary selections.
 
 ---
 
----
+## Project layout
 
-## Project layout / 目录结构
-
-```
-comsolpilot/
-|-- src/                      MCP server, tools, telemetry 源码
-|   +-- server.py             FastMCP server - 121 tools in 2 tiers, 5 prompts 服务端
-|   +-- mcp_targets.py        multi-client config registry 多客户端配置注册表
-|   +-- cli.py                doctor / onboard / config / demo 命令行工具
-|   +-- tools/                session, admin (setup/config), gateway + catalog (tool surface), geometry, physics, mesh, study, results, telemetry
-|-- scripts/                  server lifecycle, config reader, client sync 服务端生命周期、配置读取、客户端同步
-|-- docs/                     guides (Chinese) 中文指南
-|-- tests/                    pytest suite 测试
-+-- workspace/                runtime artifacts (git-ignored) 运行时产物（不入库）
+```text
+COMSOLPilot/
+|-- src/                      MCP server, tools and telemetry
+|   +-- server.py             FastMCP server: 121 tools in two tiers, 5 prompts
+|   +-- mcp_targets.py        Multi-client configuration registry
+|   +-- cli.py                doctor / onboard / config / demo commands
+|   +-- tools/                Session, setup, gateway, geometry, physics, mesh,
+|                             study, results and telemetry tools
+|-- scripts/                  Server lifecycle, configuration and client sync
+|-- docs/                     Guides (Chinese)
+|-- tests/                    pytest suite
++-- workspace/                Runtime artifacts (git-ignored)
 ```
 
 ---
 
-## Troubleshooting / 常见问题
+## Troubleshooting
 
-| Problem 问题 | Fix 处理 |
+| Problem | Fix |
 |---|---|
-| Client says "Not connected" / 客户端连不上 | Enable the MCP connector in your client. COMSOL state=idle is normal; the first modeling request starts it. 先启用 MCP 连接器；COMSOL 状态 idle 是正常的，首次建模会自动启动 |
-| COMSOL will not start, `Can't load library` / COMSOL 起不来 | The connector caches JPype's native bridge on an ASCII path. Inspect `runtime.native_bridge_ready` and `workspace/logs/worker.log`. 新版自动处理中文路径；检查原生桥接诊断和工作进程日志 |
-| AI should start / reconfigure COMSOL / 想让 AI 自己启动或改配置 | Ask it: `comsol_environment` → `comsol_set_preferences` → `comsol_start_server`. See [docs/AI_SETUP_CN.md](docs/AI_SETUP_CN.md). 直接让 AI 调用这几个工具即可 |
-| "Server is in use by another client" / 服务端被占用 | Transient GUI-sync contention — the tools retry internally. 属 GUI 同步的瞬时争用，工具内部已自动重试 |
-| Model prompts "save changes?" / 关模型提示保存 | Expected: the AI adds tables and parameters to the model. Save freely. 正常现象：AI 会在模型里添加表格和参数，保存即可 |
-| Port 2036 busy / 端口被占 | Change `port` in `config.toml`, or set the `COMSOL_PORT` environment variable. 改 `config.toml` 里的 `port`，或设 `COMSOL_PORT` 环境变量 |
-| git clone certificate error / clone 报证书吊销 | Corporate proxy blocks CRL fetch: `git -c http.schannelCheckRevoke=false clone ...`. 公司网络下拉不到吊销列表，临时关闭吊销检查 |
-| Solve fails, "singular matrix" / 求解失败 | Look at `solve_error`. Most often a boundary condition's `where` matched nothing - check the selection or switch to a symbolic face. 先看 `solve_error`；多数是边界条件没选到面，检查 `where` 或改用符号化选面 |
-| Result looks wrong / 结果数值可疑 | A field that overshoots the boundary values you imposed is not trustworthy - the solver flags it in `solve_error`. 超出所施加边界值的场不可信，求解器会在 `solve_error` 里标记 |
-| Geometry feature missing (Sweep, Extrude, coil) / 缺少扫掠、拉伸等特征 | Not covered by a dedicated tool - use `model_execute_python` for raw COMSOL Java API. 用 `model_execute_python` 走原生 API |
-| COMSOL not found / 找不到 COMSOL | Set `COMSOL_SERVER_EXE`, or let `comsol_environment` report what it can see. 设 `COMSOL_SERVER_EXE`，或先用 `comsol_environment` 看它发现了什么 |
-| Model piling up in memory / 模型占内存 | `model_clear_all` unloads every model from the session. 用 `model_clear_all` 清空 |
-| Tools missing in this chat / 本会话看不到新工具 | A conversation's tool list is frozen when created. Open a NEW conversation. 会话的工具清单在创建时定死，改完配置请开新对话验证 |
+| Client says "Not connected" | Enable the MCP connector in your client. COMSOL `state=idle` is normal; the first modeling request starts it |
+| COMSOL will not start, `Can't load library` | The connector caches JPype's native bridge on an ASCII path. Inspect `runtime.native_bridge_ready` and `workspace/logs/worker.log` |
+| AI should start or reconfigure COMSOL | Ask it to call `comsol_environment`, `comsol_set_preferences`, then `comsol_start_server`. See the [AI setup guide](docs/AI_SETUP_CN.md). Changed version/port settings require a new worker session |
+| "Server is in use by another client" | GUI-sync contention can be transient; the tools retry internally |
+| Model prompts "save changes?" | The AI may have added tables, parameters or other model nodes. Review and save the changes |
+| Port 2036 is busy | Change `port` in `config.toml`, or set `COMSOL_PORT`, before starting a new worker session |
+| Git clone certificate revocation error | If a corporate proxy blocks CRL retrieval, use the per-command option `git -c http.schannelCheckRevoke=false clone ...` only in that trusted environment |
+| Solve fails, "singular matrix" | Inspect `solve_error`. Check whether a boundary condition's `where` matched an entity; correct the selection or use a symbolic face |
+| Result looks wrong | Check `solve_error`, units and boundary selections. Investigate fields that exceed imposed boundary values |
+| Geometry feature has no dedicated tool (Sweep, Extrude, coil) | Use `model_execute_python` for the native COMSOL Java API |
+| COMSOL is not found | Set `COMSOL_SERVER_EXE`, or inspect discovery results from `comsol_environment` |
+| Models are piling up in memory | `model_clear_all` unloads every model in the session; use it only when all those models can be closed |
+| New tools are missing in this chat | Refresh the client's MCP connection and open a new conversation to reload the tool list |
 
-More guides / 更多指南:
-[AI 启动与配置](docs/AI_SETUP_CN.md) ·
-[两级工具面](docs/TOOL_TIERS_CN.md) ·
-[客户端接入](docs/CONNECTORS_CN.md) ·
-[建模约束](docs/MODELING_CONSTRAINTS_CN.md) ·
-[手册检索与问题库](docs/REFERENCE_KNOWLEDGE_CN.md)
+More guides (Chinese):
+[AI startup and configuration](docs/AI_SETUP_CN.md) ·
+[Two-tier tools](docs/TOOL_TIERS_CN.md) ·
+[Client connections](docs/CONNECTORS_CN.md) ·
+[Modeling constraints](docs/MODELING_CONSTRAINTS_CN.md) ·
+[Manual search and knowledge base](docs/REFERENCE_KNOWLEDGE_CN.md)
 
 ---
 
-## License / 许可证
+## License
 
 [MIT](LICENSE) — use it, fork it, ship it.
-MIT 许可证——随便用，随便改，随便发布。
 
 ---
 
 <div align="center">
 
-**道阻且长，行则将至。**
 *The road ahead is long — and walking it gets you there.*
 
 </div>

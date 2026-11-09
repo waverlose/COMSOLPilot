@@ -23,6 +23,7 @@ workspace/tmp/*
 workspace/logs/*
 workspace/exports/*
 workspace/models/*
+workspace/benchmarks/
 workspace/knowledge_base/*
 workspace/pdf/*
 !workspace/cache/.gitkeep
