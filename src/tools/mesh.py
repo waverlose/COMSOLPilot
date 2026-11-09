@@ -112,7 +112,8 @@ def register_mesh_tools(mcp: FastMCP) -> None:
             if mesh_size is not None:
                 if mesh_size < 1 or mesh_size > 9:
                     return {"success": False, "error": "mesh_size must be between 1 and 9."}
-                mesh.feature("size").set("hauto", int(mesh_size))
+                from jpype import JInt
+                mesh.feature("size").set("hauto", JInt(int(mesh_size)))
 
             if run:
                 mesh.run()

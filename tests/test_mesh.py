@@ -8,6 +8,13 @@ from src.tools.mesh import register_mesh_tools, session_manager
 
 
 def test_mesh_ensure_sets_native_global_size(monkeypatch):
+    import jpype
+
+    class JavaInt(int):
+        pass
+
+    monkeypatch.setattr(jpype, "JInt", JavaInt)
+
     class Feature:
         def __init__(self, tag):
             self._tag = tag
@@ -17,6 +24,7 @@ def test_mesh_ensure_sets_native_global_size(monkeypatch):
             return self._tag
 
         def set(self, name, value):
+            assert isinstance(value, JavaInt), "Native Java overloads require an explicit JInt"
             self.properties[name] = value
 
     class Mesh:

@@ -8,7 +8,8 @@ This module folds the surface into two tiers:
 
 * **Tier 1** — a handful of always-visible tools. ``tools_catalog`` (in
   :mod:`catalog`) lists and searches everything, ``tools_describe`` returns one
-  tool's full input schema, and ``tools_call`` runs it.
+  tool's full input schema, and ``tools_call`` runs it. The bulk builder
+  ``workflow_execute_spec`` is also visible directly for initial setup.
 * **Tier 2** — every modelling tool, unchanged, reachable by name through
   ``tools_call``. They keep their schemas, their docstrings and the
   observability wrapper, so behaviour is identical to the flat surface.
@@ -72,7 +73,7 @@ def collapse_to_gateway(mcp: FastMCP, keep: tuple[str, ...] = ()) -> dict:
 
     manager = getattr(mcp, "_tool_manager", None)
     tools = dict(getattr(manager, "_tools", {})) if manager is not None else {}
-    keep_names = set(keep) | top_level_extra() | set(GATEWAY_TOOLS)
+    keep_names = set(keep) | top_level_extra() | set(GATEWAY_TOOLS) | {"workflow_execute_spec"}
 
     demoted = {name: tool for name, tool in tools.items() if name not in keep_names}
     _REGISTRY.clear()
@@ -223,14 +224,11 @@ def register_gateway_tools(mcp: FastMCP) -> None:
     def tools_call(name: str, arguments: dict = None) -> dict:
         """Run any COMSOLPilot tool by name - the second tier of the tool surface.
 
-        Only a few tools are visible directly; every other tool is reached
-        through here. Find the name with tools_catalog, check its parameters
-        with tools_describe, then pass them as `arguments`. For example, to
-        build a model end to end:
-
-            tools_call('workflow_capabilities')
-            tools_call('workflow_validate_spec', {'spec': {...}})
-            tools_call('workflow_execute_spec', {'spec': {...}, 'solve': true})
+        For initial setup, call the visible workflow_execute_spec directly with
+        solve=false and collect_outputs=false. It validates and builds in one
+        call. Use this gateway for subsequent small adjustments: find a tool
+        with tools_catalog, inspect unfamiliar parameters with tools_describe,
+        then pass them as arguments. Do not rerun initialization to edit a model.
 
         Args:
             name: Exact tool name from tools_catalog, e.g. 'geometry_add_block'

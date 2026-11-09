@@ -36,7 +36,7 @@ Documentation search and verified troubleshooting notes are described in the
 | Feature | Description |
 |---|---|
 | 121 tools | Geometry (blocks, cylinders, boolean operations), materials, physics (es/ec/ht/spf/solid), mesh, studies, results, plots and parametric sweeps |
-| Two-tier surface | Only `tools_catalog`, `tools_describe` and `tools_call` are visible by default; the other 118 tools are reached by name |
+| Two-tier surface | `workflow_execute_spec` handles bulk setup directly; `tools_catalog`, `tools_describe` and `tools_call` provide access to the other 117 tools |
 | GUI sync | The AI works on the same server as your Desktop, so you can watch its operations live |
 | AI-driven setup | MCP connects immediately; COMSOL starts on the first modeling request. Configure the version, port and client through conversation |
 | One-click launcher | One-time environment setup, followed by a GUI/headless menu; shared settings live in `config.toml` |
@@ -158,8 +158,60 @@ with changed settings.
 
 ## Tool surface: two tiers
 
-The server advertises three tools by default. Everything else is reached by name
-through `tools_call`, with its input schema, documentation and logging.
+The server advertises four tools by default: `workflow_execute_spec` for bulk
+initial setup, plus three gateways for finding and calling individual tools.
+
+**Start in bulk, then refine.** For a new model, call `workflow_execute_spec`
+once with `solve=false` and `collect_outputs=false`. It validates the spec and
+sets up parameters, geometry, materials, physics, mesh and study nodes inside
+the server. A separate validation call is optional. For example, pass this
+payload directly to `workflow_execute_spec`:
+
+```json
+{
+  "spec": {
+    "model": {"name": "HeatBlock", "dimension": 3},
+    "parameters": {"L": "10[mm]"},
+    "geometry": [
+      {"type": "block", "tag": "blk1", "position": [0, 0, 0], "size": ["L", "L", "L"]}
+    ],
+    "materials": [
+      {"tag": "mat1", "label": "Aluminum", "properties": {
+        "thermalconductivity": "205[W/(m*K)]",
+        "density": "2700[kg/m^3]",
+        "heatcapacity": "900[J/(kg*K)]"
+      }}
+    ],
+    "physics": [
+      {"type": "ht", "boundary_conditions": [
+        {"tag": "hot", "type": "Temperature", "where": {"face": "zmin"}, "properties": {"T0": "373.15[K]"}},
+        {"tag": "cold", "type": "Temperature", "where": {"face": "zmax"}, "properties": {"T0": "293.15[K]"}}
+      ]}
+    ],
+    "mesh": {"tag": "mesh1", "size": 7, "run": true},
+    "study": {"tag": "std1", "type": "Stationary"}
+  },
+  "solve": false,
+  "collect_outputs": false
+}
+```
+
+The result includes model/component/geometry/mesh/study identifiers and geometry
+and mesh counts. Numeric geometry lengths are meters; primitive dimensions can
+also use COMSOL expressions referencing the supplied parameters. Materials and
+physics are optional for geometry-only setup. Initialization creates a new model;
+keep the returned model name and use individual tools for later changes:
+
+```text
+tools_call("param_set", {"model_name": "HeatBlock", "name": "L", "value": "12[mm]"})
+tools_call("geometry_build", {"model_name": "HeatBlock", "geometry_name": "geom1"})
+tools_call("mesh_ensure", {"model_name": "HeatBlock", "mesh_size": 6})
+```
+
+Do not rerun initialization to modify an existing model. On execution failure,
+the partial model is retained and its name is returned for inspection or repair.
+Set `solve=true` only when you also want the workflow to solve the new model.
+For features outside the example, discover the relevant schema or small tool:
 
 ```text
 tools_catalog()                                  # List tools by group

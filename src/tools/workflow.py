@@ -175,6 +175,7 @@ def _capabilities_payload() -> dict[str, Any]:
     return {
         "spec_schema": {
             "model": "Object: name, dimension=2|3, component='comp1', geometry='geom1'",
+            "parameters": "Optional name-to-expression object, e.g. {'L': '10[mm]'}. Set before geometry; primitive dimensions may reference these parameters.",
             "geometry": "Array of features, applied in order: block, cylinder, sphere, rectangle, circle, array, difference, union, fillet, chamfer, move. Coordinates and sizes are SI meters.",
             "union": "Optional boolean or object {tag, inputs}.",
             "materials": "Array of {tag, label, properties, domains}. properties use COMSOL keys.",
@@ -319,6 +320,7 @@ class SpecValidator:
         if not isinstance(self.spec, dict):
             return {"valid": False, "errors": ["spec must be an object."], "warnings": []}
         self._model()
+        self._parameters()
         self._geometry()
         self._union()
         self._materials()
@@ -335,6 +337,18 @@ class SpecValidator:
             return
         if model.get("dimension", 3) not in (2, 3):
             self.errors.append("model.dimension must be 2 or 3.")
+
+    def _parameters(self) -> None:
+        parameters = self.spec.get("parameters", {})
+        if not isinstance(parameters, dict):
+            self.errors.append("parameters must be a name-to-expression object.")
+            return
+        for name, value in parameters.items():
+            if not isinstance(name, str) or not name.strip():
+                self.errors.append("parameters must have non-empty string names.")
+            if (isinstance(value, bool) or not isinstance(value, (str, int, float))
+                    or isinstance(value, str) and not value.strip()):
+                self.errors.append(f"parameters.{name} must be a number or non-empty expression.")
 
     def _geometry(self) -> None:
         geometry = self.spec.get("geometry", [])
@@ -386,7 +400,7 @@ class SpecValidator:
             elif feature_type in ("array",):
                 self._tag_list(feature, "input", path, minimum=1)
                 if feature.get("displacement") is not None:
-                    self._vector(feature, "displacement", 3, path)
+                    self._vector(feature, "displacement", 3, path, expressions=False)
             elif feature_type == "difference":
                 self._tag_list(feature, "input", path, minimum=1)
                 self._tag_list(feature, "subtract", path, minimum=1)
@@ -578,14 +592,20 @@ class SpecValidator:
             return None
         return PHYSICS_ALIAS_TO_TAG.get(_norm(value))
 
-    def _vector(self, item: dict, key: str, length: int, path: str) -> None:
+    def _vector(self, item: dict, key: str, length: int, path: str, expressions: bool = True) -> None:
         value = item.get(key)
-        if not isinstance(value, list) or len(value) != length or not all(isinstance(v, (int, float)) for v in value):
-            self.errors.append(f"{path}.{key} must be an array of {length} numbers in meters.")
+        def valid(v):
+            return (not isinstance(v, bool) and isinstance(v, (int, float))
+                    or expressions and isinstance(v, str) and bool(v.strip()))
+        if not isinstance(value, list) or len(value) != length or not all(valid(v) for v in value):
+            units = "numbers in meters or COMSOL expressions" if expressions else "numbers in meters"
+            self.errors.append(f"{path}.{key} must be an array of {length} {units}.")
 
     def _number(self, item: dict, key: str, path: str) -> None:
-        if not isinstance(item.get(key), (int, float)):
-            self.errors.append(f"{path}.{key} must be a number in meters.")
+        value = item.get(key)
+        if (isinstance(value, bool) or not isinstance(value, (int, float, str))
+                or isinstance(value, str) and not value.strip()):
+            self.errors.append(f"{path}.{key} must be a number in meters or a non-empty COMSOL expression.")
 
 
 class JavaWorkflowExecutor:
@@ -632,6 +652,7 @@ class JavaWorkflowExecutor:
                               "then reconnect the connector once so it attaches.")}
         try:
             self._create_model()
+            self._parameters()
             self._report("model")
             self._bootstrap()
             self._geometry_features()
@@ -653,13 +674,18 @@ class JavaWorkflowExecutor:
             return {
                 "success": solve_error is None,
                 "model": self.model_name,
+                "component": str(self.component.tag()),
+                "geometry": str(self.geometry.tag()),
+                "mesh": self.spec.get("mesh", {}).get("tag", "mesh1"),
+                "study": study_tag,
                 "log": self.log,
                 "solved": solved,
                 "solve_error": solve_error,
                 "outputs": outputs,
             }
         except Exception as exc:
-            return {"success": False, "stage": "execute", "error": str(exc), "log": self.log}
+            return {"success": False, "stage": "execute", "model": self.model_name,
+                    "error": str(exc), "log": self.log}
 
     def _create_model(self) -> None:
         client = session_manager.client
@@ -670,6 +696,13 @@ class JavaWorkflowExecutor:
         self.model_name = session_manager.add_model(self.model)
         session_manager.set_current_model(self.model_name)
         self.log.append({"step": "model_create", "model": self.model_name})
+
+    def _parameters(self) -> None:
+        parameters = self.spec.get("parameters", {})
+        for name, value in parameters.items():
+            session_manager.retry_comsol_busy(lambda: self.model.java.param().set(name, str(value)))
+        if parameters:
+            self.log.append({"step": "parameters", "names": list(parameters)})
 
     def _bootstrap(self) -> None:
         model_spec = self.spec.get("model", {})
@@ -818,7 +851,9 @@ class JavaWorkflowExecutor:
                     "feature_type='Repair' or 'ConvertToSolid') and retrying. "
                     "Original kernel message: " + message[:200]) from exc
             raise
-        self.log.append({"step": "geometry_build", "geometry": self.geometry.tag()})
+        self.log.append({"step": "geometry_build", "geometry": self.geometry.tag(),
+                         "domains": int(self.geometry.getNDomains()),
+                         "boundaries": int(self.geometry.getNBoundaries())})
 
     def _last_geometry_tag(self, exclude: str) -> str:
         """Tag of the feature before *exclude* - the owner of the fillet edges."""
@@ -1227,12 +1262,19 @@ class JavaWorkflowExecutor:
         return selection.tag()
 
     def _mesh(self) -> None:
+        from jpype import JInt
+
         mesh_spec = self.spec.get("mesh", {})
         tag = mesh_spec.get("tag", "mesh1")
         existing = {mesh.tag(): mesh for mesh in self.component.mesh()}
         mesh = existing.get(tag) or session_manager.retry_comsol_busy(
             lambda: self.component.mesh().create(tag)
         )
+        feature_tag, feature_type = (("ftet1", "FreeTet") if
+                                    self.spec.get("model", {}).get("dimension", 3) == 3
+                                    else ("ftri1", "FreeTri"))
+        if feature_tag not in {str(node.tag()) for node in mesh.feature()}:
+            session_manager.retry_comsol_busy(lambda: mesh.create(feature_tag, feature_type))
         if mesh_spec.get("size") is not None:
             try:
                 size = int(mesh_spec["size"])
@@ -1244,10 +1286,16 @@ class JavaWorkflowExecutor:
                 # hard that the JVM aborts and the whole MCP process dies.
                 raise ValueError(
                     f"mesh.size must be in 1..9 (COMSOL predefined sizes), got {size}.")
-            session_manager.retry_comsol_busy(lambda: mesh.autoMeshSize(size))
+            session_manager.retry_comsol_busy(lambda: mesh.feature("size").set("hauto", JInt(size)))
         if mesh_spec.get("run", True):
             session_manager.retry_comsol_busy(lambda: mesh.run())
-        self.log.append({"step": "mesh", "tag": mesh.tag(), "ran": mesh_spec.get("run", True)})
+        summary = {"step": "mesh", "tag": mesh.tag(), "size": mesh_spec.get("size"),
+                   "ran": mesh_spec.get("run", True)}
+        if summary["ran"]:
+            summary["elements"] = int(mesh.stat().getNumElem())
+            if summary["elements"] <= 0:
+                raise RuntimeError("Mesh generation produced no elements.")
+        self.log.append(summary)
 
     def _study(self) -> str:
         study_spec = self.spec.get("study", {"type": "Stationary"})
@@ -1592,7 +1640,34 @@ def register_workflow_tools(mcp: FastMCP) -> None:
         ctx: Context | None = None,
     ) -> dict:
         """
-        Execute a structured simulation spec with a fixed Java API workflow.
+        Build a new model in one call, then use small tools for fine adjustments.
+
+        For initialization set solve=false and collect_outputs=false. Validation
+        is included; no separate capability/validation calls are required for
+        the supported shapes below. This creates a NEW model, not an update.
+
+        Spec shape:
+          model: {name, dimension: 2|3, component: 'comp1', geometry: 'geom1'}
+          parameters: optional {name: COMSOL expression or number}
+          geometry: [{type, tag, position, size}] for block/rectangle;
+            cylinder uses radius/height; sphere/circle use radius. Numeric
+            lengths are meters; primitive dimensions may be parameter expressions.
+          materials: optional [{tag, label, properties: {COMSOL key: value}, domains: 'all'}]
+          physics: optional [{type: 'ht'|'es'|'ec'|'solid'|'spf', domains: 'all',
+            boundary_conditions: [{tag, type, where: {face: 'zmin'}, properties: {...}}]}]
+          mesh: {tag: 'mesh1', size: 1..9, run: true}
+          study: {tag: 'std1', type: 'Stationary'} (also TimeDependent with tlist,
+            FrequencyDomain or Eigenfrequency). A stationary study is the default.
+
+        Example spec for a parameterized cube (no physics or solve):
+          {"model": {"name": "Cube", "dimension": 3}, "parameters": {"L": "10[mm]"},
+           "geometry": [{"type": "block", "tag": "blk1", "position": [0,0,0],
+                         "size": ["L","L","L"]}], "mesh": {"size": 7}}
+
+        Returns model/component/geometry/mesh/study tags plus geometry and mesh
+        counts in log. Reuse these tags in small tools; do not rerun this call to
+        edit the model. If a stage fails, the partial model is retained and named
+        in the error result so it can be inspected or repaired.
 
         Args:
             spec: Structured simulation specification object

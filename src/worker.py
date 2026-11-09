@@ -328,7 +328,10 @@ def install_worker_dispatch(mcp, worker):
         if worker.handles(name):
             original = tool.fn
             @functools.wraps(original)
-            async def proxy(_name=name, **kwargs):
+            async def proxy(_name=name, _context_kwarg=tool.context_kwarg, **kwargs):
+                # Request-local MCP contexts contain event-loop objects, not IPC data.
+                if _context_kwarg:
+                    kwargs.pop(_context_kwarg, None)
                 return await asyncio.to_thread(worker.call, _name, kwargs)
             tool.fn = proxy
             tool.is_async = True

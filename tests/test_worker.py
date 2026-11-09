@@ -26,6 +26,32 @@ def test_native_results_are_serialized_before_crossing_the_process_pipe():
     assert pickle.loads(pickle.dumps(safe)) == safe
 
 
+def test_direct_workflow_keeps_request_context_out_of_worker_ipc():
+    import asyncio
+    from types import SimpleNamespace
+    from mcp.server.fastmcp import Context, FastMCP
+    from src.worker import install_worker_dispatch
+
+    class RequestContext:
+        def __reduce__(self):
+            raise TypeError("Request context cannot cross process boundaries")
+
+    def call(name, arguments):
+        assert name == "workflow_execute_spec"
+        assert pickle.loads(pickle.dumps(arguments)) == {"spec": {}}
+        return {"success": True}
+
+    mcp = FastMCP("direct-context-test")
+
+    @mcp.tool()
+    def workflow_execute_spec(spec: dict, context: Context | None = None) -> dict:
+        raise AssertionError("Native workflow executed in the MCP process")
+
+    install_worker_dispatch(mcp, SimpleNamespace(handles=lambda name: True, call=call))
+    tool = mcp._tool_manager.get_tool("workflow_execute_spec")
+    assert asyncio.run(tool.run({"spec": {}}, context=RequestContext())) == {"success": True}
+
+
 def simulated_worker(connection, options):
     """Exercise the same pipe protocol as the native worker."""
     connection.send({"type": "progress", "stage": "starting_comsol", "message": "Starting test COMSOL"})

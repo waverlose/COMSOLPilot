@@ -73,6 +73,17 @@ class TestCollapse:
         assert result["enabled"] is False
         assert {"widget_add", "widget_remove"} <= _top_level(mcp)
 
+    def test_bulk_workflow_is_visible_without_pinning(self):
+        from src.tools.gateway import collapse_to_gateway
+        from src.tools.workflow import register_workflow_tools
+
+        mcp = _server()
+        register_workflow_tools(mcp)
+        collapse_to_gateway(mcp)
+
+        assert _top_level(mcp) == {
+            "tools_catalog", "tools_describe", "tools_call", "workflow_execute_spec"}
+
     def test_top_level_pin_keeps_a_tool_visible(self, monkeypatch):
         from src.tools.gateway import collapse_to_gateway
 

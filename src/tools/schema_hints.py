@@ -92,7 +92,7 @@ PARAMETER_HINTS = {
     "build": "Whether to run the geometry after creating the feature.",
     "script": "Python code to execute inside the local MCP server process against the active COMSOL model.",
     "confirm": "Explicit confirmation token required by tools that execute local code.",
-    "spec": "Structured simulation specification. The AI should translate user intent into model, geometry, materials, physics, mesh, study, and outputs before execution.",
+    "spec": "Structured specification: model, parameters, geometry, materials, physics, mesh, study, outputs. See the tool description for a copy-ready initialization example. Validation is included in execution.",
     "solve": "Whether workflow_execute_spec should run the solver after creating the model.",
     "collect_outputs": "Whether workflow_execute_spec should evaluate requested outputs after solving.",
     "material_name": "Existing COMSOL material tag or label in the model. Check model_inspect/materials first; do not assume 'Si' exists.",
@@ -130,9 +130,9 @@ PARAMETER_HINTS = {
 
 PRIMARY_WORKFLOW_DESCRIPTION = (
     "Primary AI modeling entry point. For user requests like 'build/simulate/solve a COMSOL model', "
-    "call workflow_capabilities first, translate the request into a structured spec, validate it with "
-    "workflow_validate_spec, then execute it with workflow_execute_spec. Do not start with low-level "
-    "model_create/geometry_add/physics_add tools unless debugging a workflow failure."
+    "prefer one workflow_execute_spec call. For initial setup set solve=false and collect_outputs=false; "
+    "validation is included. Query workflow_capabilities only for unfamiliar features. "
+    "After initialization, use small tools to refine the returned model instead of creating it again."
 )
 
 LOW_LEVEL_TOOL_PREFIXES = (
@@ -240,7 +240,7 @@ def apply_schema_hints(mcp: Any) -> None:
             tool.description = f"{PRIMARY_WORKFLOW_DESCRIPTION}\n\n{tool.description or ''}".strip()
         elif tool.name.startswith(LOW_LEVEL_TOOL_PREFIXES):
             tool.description = (
-                "Low-level/debug tool. For normal AI-driven modeling, prefer workflow_capabilities -> "
-                "workflow_validate_spec -> workflow_execute_spec so MCP can use stable Java tags and a fixed workflow. "
+                "Low-level/debug tool. For a new model, prefer workflow_execute_spec for bulk setup. "
+                "Use this tool to refine an existing model after initialization. "
                 f"\n\n{tool.description or ''}"
             ).strip()
