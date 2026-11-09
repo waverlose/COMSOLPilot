@@ -1,10 +1,29 @@
 """Demand-start lifecycle tests using real isolated processes, without COMSOL."""
 
 import os
+import pickle
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+
+
+def test_native_results_are_serialized_before_crossing_the_process_pipe():
+    from src.worker import _ipc_result
+
+    class NativeString:
+        def __str__(self):
+            return "mesh1"
+
+        def __reduce__(self):
+            raise TypeError("Native Java objects cannot be pickled")
+
+    result = {"mesh": NativeString(), "stats": {"elements": 12}, "built": True}
+    with pytest.raises(TypeError, match="cannot be pickled"):
+        pickle.dumps(result)
+    safe = _ipc_result(result)
+    assert safe == {"mesh": "mesh1", "stats": {"elements": 12}, "built": True}
+    assert pickle.loads(pickle.dumps(safe)) == safe
 
 
 def simulated_worker(connection, options):

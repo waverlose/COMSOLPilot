@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import json
 import multiprocessing
 import os
 import threading
@@ -17,6 +18,12 @@ _LOCAL_TOOLS = {
     "workflow_recipes", "physics_get_available",
 }
 _START_TOOLS = {"comsol_start", "comsol_start_server", "comsol_connect"}
+
+
+def _ipc_result(value):
+    """Use FastMCP's JSON fallback before native Java values cross the pipe."""
+    from pydantic_core import to_json
+    return json.loads(to_json(value, fallback=str))
 
 
 def _session_status(manager):
@@ -95,7 +102,7 @@ def worker_main(connection, options):
                     else:
                         value = call_tool(mcp, request["name"], request["arguments"])
                     connection.send({"type": "result", "id": request["id"],
-                                     "result": value, "status": _session_status(manager)})
+                                     "result": _ipc_result(value), "status": _session_status(manager)})
                 except Exception as exc:
                     connection.send({"type": "result", "id": request["id"],
                                      "result": {"success": False, "error": str(exc)}})
