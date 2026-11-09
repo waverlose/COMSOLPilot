@@ -121,6 +121,8 @@ def _active_version() -> str:
 def environment_report() -> dict:
     """Assemble the environment picture the assistant needs before acting."""
     runtime_python = sys.executable
+    native_bridge = str(getattr(sys.modules.get("_jpype"), "__file__", ""))
+    native_bridge_ready = bool(native_bridge and native_bridge.isascii())
     packages = {}
     for name in ("mph", "jpype", "mcp", "pydantic", "pypdf"):
         try:
@@ -157,6 +159,8 @@ def environment_report() -> dict:
             "venv_python": _venv_python(),
             "project": str(_project_root()),
             "venv_on_non_ascii_path": _non_ascii(str(_project_root())),
+            "native_bridge": native_bridge,
+            "native_bridge_ready": native_bridge_ready,
         },
         "packages": packages,
         "comsol": {"installed": [v["name"] for v in versions],
@@ -173,7 +177,7 @@ def environment_report() -> dict:
         "note": (
             "JPype cannot load its native bridge from a non-ASCII path: keep the "
             "project (and its .venv) on an ASCII-only path or COMSOL will not start."
-            if _non_ascii(str(_project_root())) else
+            if _non_ascii(str(_project_root())) and not native_bridge_ready else
             "Environment looks startable; comsol_start_server will use the "
             "active COMSOL version and the saved port."
         ),

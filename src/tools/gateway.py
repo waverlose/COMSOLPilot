@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import json
 import os
+from difflib import get_close_matches
 from typing import Any, Optional
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import ValidationError
 
 GATEWAY_TOOLS = ("tools_catalog", "tools_describe", "tools_call")
 
@@ -111,25 +113,56 @@ def call_tool(mcp: FastMCP, name: str, arguments: Any = None) -> Any:
                 "hint": "Call tools_catalog() to list tools or "
                         "tools_catalog(query=...) to search."}
 
+    failure = {
+        "success": False, "code": "invalid_arguments", "tool": name,
+        "hint": f"Call tools_describe('{name}') for the full input schema, then retry with corrected arguments.",
+    }
     params, problem = _coerce_arguments(arguments)
     if problem:
-        return {"success": False, "error": problem, "tool": name}
+        return {**failure, "error": problem}
 
     schema = getattr(tool, "parameters", {}) or {}
     properties = set(schema.get("properties", {}))
     unknown = sorted(key for key in params if key not in properties)
     missing = sorted(key for key in schema.get("required", []) if key not in params)
     if unknown or missing:
+        problems = []
+        if unknown:
+            problems.append("unknown parameter(s): " + ", ".join(unknown))
+        if missing:
+            problems.append("missing required parameter(s): " + ", ".join(missing))
+        suggestions = {key: get_close_matches(key, sorted(properties), n=3, cutoff=0.6)
+                       for key in unknown}
         return {
-            "success": False,
-            "tool": name,
-            "error": ("unknown parameter(s): " + ", ".join(unknown)) if unknown
-                     else ("missing required parameter(s): " + ", ".join(missing)),
+            **failure,
+            "error": "; ".join(problems),
             "valid_parameters": sorted(properties),
-            "hint": f"Call tools_describe('{name}') for the full input schema.",
+            "unknown_parameters": unknown,
+            "missing_parameters": missing,
+            "parameter_suggestions": {key: values for key, values in suggestions.items() if values},
+        }
+
+    # Match FastMCP's direct calls: parse JSON-encoded containers and validate
+    # argument types before the wrapped function can modify a COMSOL model.
+    metadata = tool.fn_metadata
+    try:
+        parsed = metadata.pre_parse_json(params)
+        params = metadata.arg_model.model_validate(parsed).model_dump_one_level()
+    except ValidationError as exc:
+        errors = [{"parameter": ".".join(str(part) for part in error["loc"]),
+                   "message": error["msg"], "type": error["type"]}
+                  for error in exc.errors()]
+        return {
+            **failure,
+            "error": "invalid parameter value(s): " + "; ".join(
+                f"{error['parameter']}: {error['message']}" for error in errors),
+            "validation_errors": errors,
         }
 
     try:
+        worker = getattr(mcp, "_comsol_worker", None)
+        if worker is not None and worker.handles(name):
+            return worker.call(name, params)
         return tool.fn(**params)
     except Exception as exc:  # noqa: BLE001 - surfaced to the caller, already logged inside
         return {"success": False, "tool": name,
@@ -170,7 +203,8 @@ def register_gateway_tools(mcp: FastMCP) -> None:
         Args:
             name: Exact tool name from tools_catalog, e.g. 'physics_boundary_selection'
         """
-        tool = known_tools(mcp).get((name or "").strip())
+        name = (name or "").strip()
+        tool = known_tools(mcp).get(name)
         if tool is None:
             return {"success": False, "error": f"Unknown tool: {name}",
                     "did_you_mean": _suggest(mcp, name or ""),

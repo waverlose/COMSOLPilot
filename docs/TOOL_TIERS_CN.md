@@ -26,8 +26,12 @@ COMSOLPilot 现在有一百多个工具。如果全部平铺到一级，客户�
 
 ```text
 tools_catalog()                                   # 看全部（分组）
-tools_catalog(query="thermal conduction")         # 按关键字找
-tools_catalog(category="geometry")                # 按领域找
+tools_catalog(query="thermal conduction")         # 按英文关键字找
+tools_catalog(query="热流")                        # 中文关键字也能找
+tools_catalog(query="圆柱")                        # 查找圆柱几何工具
+tools_catalog(category="几何")                     # 按中文分组筛选
+tools_catalog(category="物理场", query="热传导")    # 分类与关键字组合
+tools_catalog(category="geometry")                # 保留英文筛选方式
 tools_describe("geometry_add_block")              # 看参数
 tools_call("geometry_add_block", {"size": [0.1, 0.1, 0.1], "position": [0, 0, 0]})
 ```
@@ -40,8 +44,20 @@ tools_call("workflow_validate_spec", {"spec": {...}})
 tools_call("workflow_execute_spec", {"spec": {...}, "solve": true})
 ```
 
-参数写错时，`tools_call` 会直接返回 `valid_parameters` 和 `did_you_mean`，
-不会去执行一个半成品调用。
+搜索支持常用中文术语（如“长方体”“圆柱”“热传导”“热流”“边界条件”）及中英文混合关键字。
+多个关键字用空格分隔，必须全部匹配；中文分类使用目录返回的分组名，如“几何”“物理场”“研究与求解”。
+
+参数写错时，网关会在执行前检查，并返回可用于修正的结构化信息：
+
+- 工具名错误：返回 `did_you_mean` 候选工具名。
+- 参数名错误或缺少必填项：同时返回 `unknown_parameters`、`missing_parameters`、
+  `valid_parameters` 和拼写建议 `parameter_suggestions`。
+- 参数类型错误：返回 `code="invalid_arguments"` 和 `validation_errors`，
+  指明参数路径、错误原因和错误类型。例如 `size.1` 表示 `size` 数组的第二项。
+
+参数类型检查与 FastMCP 直接调用使用相同的验证模型：可解析的数字字符串会转为数字，
+JSON 数组或对象字符串会按目标参数类型解析。无法通过检查时不会执行目标工具；按 `hint`
+查看 `tools_describe` 后修正参数即可。
 
 ---
 

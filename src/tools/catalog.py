@@ -33,6 +33,36 @@ _CATEGORIES: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 
+# Keep discovery bilingual without changing tool names or requiring a model.
+_QUERY_ALIASES: dict[str, tuple[str, ...]] = {
+    "环境": ("environment", "version"),
+    "连接": ("connect", "session"),
+    "模型": ("model",),
+    "参数": ("parameter",),
+    "参数扫描": ("parametric", "sweep"),
+    "几何": ("geometry",),
+    "长方体": ("block",),
+    "圆柱": ("cylinder",),
+    "球体": ("sphere",),
+    "材料": ("material",),
+    "物理场": ("physics",),
+    "静电": ("electrostatic",),
+    "传热": ("heat", "thermal"),
+    "热传导": ("heat", "thermal"),
+    "热流": ("heat flux", "heat_flux", "heatflux"),
+    "流体": ("flow", "fluid"),
+    "层流": ("laminar",),
+    "固体": ("solid",),
+    "力学": ("mechanic",),
+    "边界": ("boundary",),
+    "边界条件": ("boundary",),
+    "网格": ("mesh",),
+    "求解": ("solve", "study"),
+    "结果": ("result", "dataset", "solution"),
+    "工作流": ("workflow",),
+}
+
+
 def group_tool_names(names: list[str]) -> list[dict]:
     """Group tool names deterministically while preserving alphabetical order."""
     remaining = set(names)
@@ -103,16 +133,28 @@ def _score(name: str, text: str, query: str, category: str) -> int:
     Matching covers the whole description, not just the summary line, so a query
     like 'heat flux' finds a tool whose docstring only mentions flux further in.
     """
+    name_lower = name.casefold()
     haystack = f"{name}\n{text}".casefold()
-    if category and category.casefold() not in haystack:
-        return 0
+    if category:
+        category_lower = category.strip().casefold()
+        if category_lower in {"其他", "other"} or any(
+                category_lower == label.casefold() for label, _ in _CATEGORIES):
+            label = next((label for label, prefixes in _CATEGORIES
+                          if name.startswith(prefixes)), "其他")
+            if category_lower == "other":
+                category_lower = "其他"
+            if label.casefold() != category_lower:
+                return 0
+        elif category_lower not in haystack:
+            return 0
     if not query:
         return 1
     score = 0
     for token in query.casefold().split():
-        if token in name.casefold():
+        alternatives = (token,) + _QUERY_ALIASES.get(token, ())
+        if any(term in name_lower for term in alternatives):
             score += 3
-        elif token in haystack:
+        elif any(term in haystack for term in alternatives):
             score += 1
         else:
             return 0
@@ -156,7 +198,7 @@ def catalog(mcp: FastMCP, query: str = "", category: str = "",
         "success": True,
         "tool_count": len(tools),
         "groups": groups,
-        "hint": ("Search with tools_catalog(query='heat flux') or category='geometry' "
+        "hint": ("Search with tools_catalog(query='热流') or category='几何' (English keywords also work) "
                  "to get a one-line summary of each match; tools_describe(name) then "
                  "gives the exact parameters."),
     }
@@ -173,8 +215,8 @@ def register_catalog_tools(mcp: FastMCP) -> None:
         schema and tools_call to run it.
 
         Args:
-            query: Space-separated keywords matched against tool names and descriptions, e.g. 'thermal conduction'
-            category: Only tools whose name contains this text, e.g. 'geometry' or 'results'
+            query: Space-separated Chinese or English keywords, e.g. '热流', '圆柱' or 'thermal conduction'; all keywords must match
+            category: Chinese group label such as '几何' or '物理场', or English name/description text such as 'geometry' or 'results'
             include_summaries: Attach a one-line summary to every tool in the plain listing (costly: ~10k characters)
         """
         return catalog(mcp, query=query, category=category,

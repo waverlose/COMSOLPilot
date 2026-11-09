@@ -22,9 +22,15 @@ from mcp.server.fastmcp import FastMCP
 _SPEC_HEADER = """Build a COMSOL model with COMSOLPilot. Work in this order and stop
 if a step reports `success: false`:
 
-1. `comsol_status` -- confirm a session exists (the connector pre-warms it at startup).
+1. `comsol_status` -- inspect readiness. An idle session is normal; no bat or reconnect is needed.
 2. `workflow_validate_spec` -- validate the spec before touching COMSOL.
-3. `workflow_execute_spec` -- execute it.
+3. `workflow_execute_spec` -- execute it; COMSOL starts automatically on demand.
+
+If a call returns `code: comsol_starting`, it has not been executed or queued.
+Poll `comsol_status` until `state: ready`, then retry the original call once.
+If it returns `code: operation_in_progress`, do not repeat it: poll status and
+read `last_operation.result` for that `request_id`. If the worker fails, inspect
+the error and use `comsol_start_server` to retry without reconnecting MCP.
 
 Tool access: only a few tools are visible directly (`tools_catalog`,
 `tools_describe`, `tools_call`); every other tool named here is reached through

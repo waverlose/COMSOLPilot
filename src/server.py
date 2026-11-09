@@ -1,6 +1,18 @@
 """COMSOLPilot - Main MCP server entry point."""
 
 import logging
+import os
+import sys
+from pathlib import Path
+
+# Some MCP clients omit Windows environment variables; mph reads them at import.
+if sys.platform == "win32":
+    for key, folder in (("APPDATA", "Roaming"), ("LOCALAPPDATA", "Local")):
+        os.environ.setdefault(key, str(Path.home() / "AppData" / folder))
+
+from .runtime import prepare_native_bridge
+prepare_native_bridge()
+
 from mcp.server.fastmcp import FastMCP
 
 from .tools.session import register_session_tools
@@ -31,7 +43,7 @@ logger = logging.getLogger(__name__)
 mcp = FastMCP("COMSOLPilot")
 
 
-def register_all_tools() -> None:
+def register_all_tools(worker=None) -> None:
     """Register all MCP tools."""
     register_session_tools(mcp)
     register_admin_tools(mcp)
@@ -58,6 +70,9 @@ def register_all_tools() -> None:
     # mirrors each call into COMSOL's own progress window and into a structured
     # JSONL log, and never changes the advertised schema.
     wrapped = install_observability(mcp)
+    if worker is not None:
+        from .worker import install_worker_dispatch
+        install_worker_dispatch(mcp, worker)
     # Then collapse the surface: keep the discovery/dispatch gateways visible and
     # move the rest behind tools_call. Runs after the wrapping so calls through
     # the gateway are instrumented exactly like direct calls.
@@ -70,43 +85,26 @@ def register_all_tools() -> None:
         logger.info("Registered %d tools (flat surface)", wrapped)
 
 
-def register_all_resources() -> None:
+def register_all_resources(worker=None) -> None:
     """Register all MCP resources."""
-    register_model_resources(mcp)
+    register_model_resources(mcp, worker=worker)
     logger.info("Registered all resources")
 
 
 def main() -> None:
-    """Run the MCP server."""
-    logger.info("Starting COMSOLPilot MCP Server...")
+    """Serve MCP immediately; initialize COMSOL in an isolated worker on demand."""
+    from .worker import ComsolWorker
+    from .tools.session import _autostart_enabled
 
-    register_all_tools()
-    register_all_resources()
-
-    # The single COMSOL JVM handshake for this process happens here, on the main
-    # thread, BEFORE the MCP event loop starts serving. Doing it here keeps the
-    # first tool call instant; a JVM started later from a tool call also works
-    # (see SessionManager._run_jvm_task), so this is an optimisation, not a
-    # hard requirement. When COMSOL is not running yet and autostart is on,
-    # prewarm starts the server itself, so the connector launch is the only
-    # start-up action the user needs - no launcher script.
-    from .tools.session import session_manager
+    worker = ComsolWorker()
+    register_all_tools(worker=worker)
+    register_all_resources(worker=worker)
+    if _autostart_enabled():
+        worker.start()  # Existing opt-in: eager startup is now non-blocking too.
     try:
-        prewarm = session_manager.prewarm()
-        if prewarm.get("success"):
-            logger.info("COMSOL session pre-warmed: %s", prewarm)
-        elif prewarm.get("skipped"):
-            logger.info("COMSOL pre-warm not attempted: %s", prewarm.get("message"))
-        else:
-            logger.warning(
-                "COMSOL pre-warm failed: %s. The server still starts; ask the "
-                "assistant to run comsol_start_server, or set COMSOL_AUTOSTART=on.",
-                prewarm.get("error"),
-            )
-    except Exception as exc:  # noqa: BLE001 - never block server startup
-        logger.warning("COMSOL pre-warm raised %r; continuing without a session.", exc)
-
-    mcp.run()
+        mcp.run()
+    finally:
+        worker.close()
 
 
 if __name__ == "__main__":

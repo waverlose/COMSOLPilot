@@ -183,3 +183,77 @@ class TestDescribeAndCatalog:
 
         result = catalog(query="remove")
         assert [item["name"] for item in result["results"]] == ["widget_remove"]
+
+
+class TestArgumentValidation:
+    def test_invalid_type_does_not_execute_tool(self):
+        from src.tools.gateway import call_tool
+
+        mcp = _server()
+        calls = []
+
+        @mcp.tool()
+        def record_count(count: int) -> dict:
+            calls.append(count)
+            return {"success": True}
+
+        result = call_tool(mcp, "record_count", {"count": "many"})
+        assert result["success"] is False
+        assert result["code"] == "invalid_arguments"
+        assert result["validation_errors"][0]["parameter"] == "count"
+        assert calls == []
+
+    def test_numeric_strings_are_validated_before_execution(self):
+        from src.tools.gateway import call_tool
+
+        assert call_tool(_server(), "widget_add", {"size": "3"})["size"] == 3
+
+    def test_nested_error_identifies_the_array_item(self):
+        from src.tools.gateway import call_tool
+
+        mcp = _server()
+        calls = []
+
+        @mcp.tool()
+        def record_sizes(size: list[float]) -> dict:
+            calls.append(size)
+            return {"success": True, "size": size}
+
+        result = call_tool(mcp, "record_sizes", {"size": [1, "wide", 3]})
+        assert result["success"] is False
+        assert result["validation_errors"][0]["parameter"] == "size.1"
+        assert calls == []
+
+    def test_json_array_strings_match_fastmcp_argument_parsing(self):
+        from src.tools.gateway import call_tool
+
+        mcp = _server()
+
+        @mcp.tool()
+        def record_sizes(size: list[float]) -> dict:
+            return {"success": True, "size": size}
+
+        result = call_tool(mcp, "record_sizes", {"size": "[1, 2, 3]"})
+        assert result["size"] == [1.0, 2.0, 3.0]
+
+    def test_unknown_and_missing_parameters_are_reported_together(self):
+        from src.tools.gateway import call_tool
+
+        result = call_tool(_server(), "widget_remove", {"nmae": "old"})
+        assert result["unknown_parameters"] == ["nmae"]
+        assert result["missing_parameters"] == ["name"]
+        assert result["parameter_suggestions"] == {"nmae": ["name"]}
+        assert "nmae" in result["error"] and "name" in result["error"]
+
+    def test_malformed_json_has_a_recovery_hint(self):
+        from src.tools.gateway import call_tool
+
+        result = call_tool(_server(), "widget_add", '{"size":')
+        assert result["code"] == "invalid_arguments"
+        assert "tools_describe" in result["hint"]
+
+    def test_describe_normalizes_the_name(self):
+        mcp = _server()
+        result = mcp._tool_manager.get_tool("tools_describe").fn(" widget_add ")
+        assert result["name"] == "widget_add"
+        assert result["call_with"] == "tools_call('widget_add', {...})"

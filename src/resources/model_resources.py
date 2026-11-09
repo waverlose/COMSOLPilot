@@ -6,7 +6,7 @@ from mcp.server.fastmcp import FastMCP
 from ..tools.session import session_manager
 
 
-def register_model_resources(mcp: FastMCP) -> None:
+def register_model_resources(mcp: FastMCP, worker=None) -> dict:
     """Register model resources with the MCP server."""
     
     @mcp.resource("comsol://session/info")
@@ -16,10 +16,10 @@ def register_model_resources(mcp: FastMCP) -> None:
         
         Returns formatted session status including connection state and loaded models.
         """
-        status = session_manager.get_status()
+        status = worker.status() if worker is not None else session_manager.get_status()
         
         if not status.get("connected"):
-            return "# COMSOL Session Status\n\nNo active COMSOL session.\n\nUse `comsol_start` to start a new session."
+            return "# COMSOL Session Status\n\n" + status.get("message", "No active COMSOL session.") + "\n\nThe first modeling request starts COMSOL automatically."
         
         lines = [
             "# COMSOL Session Status",
@@ -57,6 +57,8 @@ def register_model_resources(mcp: FastMCP) -> None:
         
         Returns formatted model tree showing all features.
         """
+        if worker is not None:
+            return worker.read_resource("tree", name)
         model = session_manager.get_model(name)
         if model is None:
             return f"# Model Not Found\n\nModel '{name}' not found in current session."
@@ -116,6 +118,8 @@ def register_model_resources(mcp: FastMCP) -> None:
         
         Returns formatted parameter list with values and descriptions.
         """
+        if worker is not None:
+            return worker.read_resource("parameters", name)
         model = session_manager.get_model(name)
         if model is None:
             return f"# Model Not Found\n\nModel '{name}' not found in current session."
@@ -149,6 +153,8 @@ def register_model_resources(mcp: FastMCP) -> None:
         
         Returns formatted physics interface list.
         """
+        if worker is not None:
+            return worker.read_resource("physics", name)
         model = session_manager.get_model(name)
         if model is None:
             return f"# Model Not Found\n\nModel '{name}' not found in current session."
@@ -180,3 +186,6 @@ def register_model_resources(mcp: FastMCP) -> None:
             return "\n".join(lines)
         except Exception as e:
             return f"# Error\n\nFailed to get physics: {str(e)}"
+
+    return {"tree": get_model_tree, "parameters": get_model_parameters,
+            "physics": get_model_physics}

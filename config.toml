@@ -18,9 +18,9 @@ login_mode = "auto"
 open_desktop = true
 
 [connector]
-# 连接器启动时若无服务端监听，是否自行启动
+# false：首次建模时按需启动；true：MCP 连接时在后台提前启动
 autostart = false
-# 连接器启动时若已有服务端监听，是否直接连接
+# 旧版进程内预热参数（保留兼容）；新版使用独立工作进程，握手不等待 COMSOL
 prewarm = true
 # 等待服务端就绪的超时秒数
 prewarm_wait = 20
